@@ -11,7 +11,9 @@ from collections import defaultdict
 from multiprocessing import Pool
 from functools import partial
 from scipy.spatial.distance import cdist
+from itertools import combinations
 import numpy as np
+import pandas as pd
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -35,7 +37,7 @@ class PharmModel:
         if cluster:
             ids = self.clusters[cluster]
         if ids:
-            m = np.array([(self.p[i]['x'], self.p[i]['y'], self.p[i]['z']) for i in ids])
+            m = np.array([(self.p[i]['x'], self.p[i]['y'], self.p[i]['z']) for i in set(ids)])
         else:
             m = np.array([(i['x'], i['y'], i['z']) for i in self.p])
         return m
@@ -52,6 +54,7 @@ class PharmModel:
             xyz2 = self.xyz(ids2)
             return np.min(cdist(xyz1, xyz2))
 
+        ids = set(ids)
         selected_ids = tuple()
         min_dist = float('inf')
         for k, v in self.clusters.items():
@@ -64,7 +67,7 @@ class PharmModel:
 
     def write_model(self, fname, ids=None):
         if ids:
-            p = [self.p[i] for i in ids]
+            p = [self.p[i] for i in set(ids)]
         else:
             p = self.p
         p = {'points': p}
@@ -104,10 +107,13 @@ def __embed_multiple_confs_constrained(mol, template_mol, nconf, seed=42):
 
 def __gen_confs(mol, template_mol=None, nconf=10, seed=42):
     mol = Chem.AddHs(mol)
-    if template_mol:
-        mol = __embed_multiple_confs_constrained(mol, template_mol, nconf, seed)
-    else:
-        AllChem.EmbedMultipleConfs(mol, numConfs=nconf, maxAttempts=nconf*4, randomSeed=seed)
+    try:
+        if template_mol:
+            mol = __embed_multiple_confs_constrained(mol, template_mol, nconf, seed)
+        else:
+            AllChem.EmbedMultipleConfs(mol, numConfs=nconf, maxAttempts=nconf*4, randomSeed=seed)
+    except ValueError:
+        return None
     return mol
 
 
@@ -126,13 +132,15 @@ def append_generated_confs_file(mols, fname, template_mol=None, nconf=10, seed=4
         w = Chem.SDWriter(f)
         if pool:
             for mol in pool.imap_unordered(partial(__gen_confs, template_mol=template_mol, nconf=nconf, seed=seed), mols):
-                for c in mol.GetConformers():
-                    w.write(mol, c.GetId())
+                if mol:
+                    for c in mol.GetConformers():
+                        w.write(mol, c.GetId())
         else:
             for mol in mols:
                 mol = __gen_confs(mol, template_mol=template_mol, nconf=nconf, seed=seed)
-                for c in mol.GetConformers():
-                    w.write(mol, c.GetId())
+                if mol:
+                    for c in mol.GetConformers():
+                        w.write(mol, c.GetId())
         w.close()
 
 
@@ -167,12 +175,26 @@ def select_compounds(fname):
 def get_grow_points(mol, pharm_xyz, tol=2):
     mol_xyz = mol.GetConformer().GetPositions()
     dist = np.min(cdist(mol_xyz, pharm_xyz), axis=1)
-    ids = np.where(dist <= np.min(dist) + tol)
-    return tuple(map(int, np.flatnonzero(ids)))
+    ids = np.flatnonzero(dist <= (np.min(dist) + tol))
+    return ids.tolist()
 
 
-def grow_molecule():
-    pass
+def screen(dbdir, pharmacophore, pids, new_pids, iteration, output_dir, ncpu, pd_search):
+    # screen db against pharmacophore and if no matches screen its subpharmacopohres till the minimum size
+    flag = False
+    for i in reversed(range(1, len(new_pids) + 1)):
+        for j, new_pids_subset in enumerate(combinations(new_pids, i)):
+            cur_pids = tuple(sorted(set(pids + new_pids_subset)))
+            p_fname = os.path.join(output_dir, f'iter{iteration}-p{len(cur_pids)}-model{j}.json')
+            pharmacophore.write_model(p_fname, ids=cur_pids)
+            found_poses_fname = os.path.splitext(p_fname)[0] + '_found.sdf'
+            search_db(dbdir, p_fname, found_poses_fname, ncpu=ncpu)
+            if sdf_not_empty(found_poses_fname):
+                pd_search.loc[pd_search.shape[0]] = [iteration, cur_pids, found_poses_fname]
+                flag = True
+        if flag:
+            break
+    return flag
 
 
 def main():
@@ -211,7 +233,10 @@ def main():
     else:
         pool = None
 
-    tree_search = dict()
+    args.ids = tuple(sorted(set(args.ids)))
+
+    # tree_search = defaultdict(dict)  # {iteration_number: {pids: sdf_fname, pids: sdf_fname, ...}, ...}
+    pd_search = pd.DataFrame(columns=['iteration', 'feature_ids', 'found_sdf'])
 
     p = PharmModel(args.query)
     p.set_clusters(args.clustering_threshold)
@@ -233,35 +258,55 @@ def main():
         db_dname = os.path.join(args.output, f'iter{iteration}_db')
         create_db(conf_fname, db_dname, ncpu=args.ncpu)
 
-    p_ids = tuple(args.ids)
+    new_pids = tuple(args.ids)
+    pd_search.loc[0] = [-1, tuple(), '']
 
     while True:
 
         if iteration > 0:
-            new_ids = p.select_nearest_cluster(p_ids)
-            p_ids = p_ids + new_ids
+            # new_pids will be the same for different lines from the same iteration because only a cluster with
+            # non intersected feature ids canbe selected
+            new_pids = p.select_nearest_cluster(pd_search.loc[pd_search['iteration'] == iteration - 1].iloc[0]['feature_ids'])
+            # new_pids = p.select_nearest_cluster(tmp['feature_ids'])
+            # all generated compounds are stored in a single file, however their parent compounds could match different
+            # subsets of features. This was done due to fast screening, so we will not lose much time, but greatly
+            # simplify manipulation with data
             conf_fname = os.path.join(args.output, f'iter{iteration}.sdf')
-            mols = [mol for mol in Chem.SDMolSupplier(found_poses_fname) if mol]
-            for i, mol in enumerate(mols):
-                replace_ids = get_grow_points(mol, p.xyz(new_ids))
-                new_mols = list(grow_mol(mol, args.db, radius=3, min_atoms=1, max_atoms=3, max_replacements=None,
-                                         replace_ids=replace_ids, return_mol=True, ncores=args.ncpu))
-                new_mols = [item[1] for item in new_mols]
-                for j, new_mol in enumerate(new_mols):
-                    new_mol.SetProp('_Name', f'mol-{iteration}-{str(i).zfill(5)}-{str(j).zfill(6)}')
-                append_generated_confs_file(new_mols, fname=conf_fname, template_mol=mol, nconf=args.nconf,
-                                            pool=pool, seed=args.seed)
-            db_dname = os.path.join(args.output, f'iter{iteration}_db')
-            create_db(conf_fname, db_dname, ncpu=args.ncpu)
+            # to avoid enumeration of the same compounds we keep canonical isomeric smiles of already read molecules,
+            # because ot is unlikely that the same compound will have different orientations in matching different
+            # subsets of features (these subsets will substantially intersect)
+            read_smi = set()
+            for i, rowid in enumerate(np.where(pd_search['iteration'] == iteration - 1)):
+                for j, mol in enumerate(Chem.SDMolSupplier(pd_search.iloc[rowid]['found_sdf'].values[0])):
+                    if mol:
+                        smi = Chem.MolToSmiles(mol)
+                        if smi not in read_smi:
+                            print(mol.GetProp('_Name'))
+                            read_smi.add(smi)
+                            replace_ids = get_grow_points(mol, p.xyz(new_pids))
+                            new_mols = list(grow_mol(mol, args.db, radius=3, min_atoms=1, max_atoms=8,
+                                                     max_replacements=None, replace_ids=replace_ids, return_mol=True,
+                                                     ncores=args.ncpu))
+                            new_mols = [item[1] for item in new_mols]
+                            for k, new_mol in enumerate(new_mols):
+                                new_mol.SetProp('_Name', f'mol-{iteration}-{str(j).zfill(5)}-{str(k).zfill(6)}')
+                            # add parent compounds with the same conformation, because it may accidentally match
+                            # a large subset of features. But since we do not change its conformation this would be
+                            # unlikely
+                            new_mols += [mol]
+                            append_generated_confs_file(new_mols, fname=conf_fname, template_mol=mol, nconf=args.nconf,
+                                                        pool=pool, seed=args.seed)
+                db_dname = os.path.join(args.output, f'iter{iteration}_db')
+                create_db(conf_fname, db_dname, ncpu=args.ncpu)
 
-        p_fname = os.path.join(args.output, f'iter{iteration}.json')
-        p.write_model(p_fname, ids=p_ids)
-
-        found_poses_fname = os.path.join(args.output, f'iter{iteration}_found.sdf')
-        search_db(db_dname, p_fname, found_poses_fname, ncpu=args.ncpu)
-
-        if sdf_not_empty(found_poses_fname):
-            tree_search[p_ids] = found_poses_fname
+        flags = []
+        for rowid in np.where(pd_search['iteration'] == iteration - 1):
+            print(pd_search.iloc[rowid]['feature_ids'].values[0], new_pids)
+            flag = screen(dbdir=db_dname, pharmacophore=p, pids=pd_search.iloc[rowid]['feature_ids'].values[0],
+                          new_pids=new_pids, iteration=iteration, output_dir=args.output, ncpu=args.ncpu,
+                          pd_search=pd_search)
+            flags.append(flag)
+        if any(flags):
             iteration += 1
         else:
             break
