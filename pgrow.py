@@ -18,6 +18,8 @@ import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from crem.crem import grow_mol, grow_mol2
+from openbabel import openbabel as ob
+from openbabel import pybel
 
 
 class PharmModel:
@@ -91,7 +93,8 @@ def load_frags(fname):
     return res
 
 
-def __embed_multiple_confs_constrained(mol, template_mol, nconf, seed=42):
+def __embed_multiple_confs_constrained_rdkit(mol, template_mol, nconf, seed=42):
+
     new_confs = []
     template_mol = Chem.RemoveHs(template_mol)
     random.seed(seed)
@@ -105,16 +108,48 @@ def __embed_multiple_confs_constrained(mol, template_mol, nconf, seed=42):
     return out_mol
 
 
+def __embed_multiple_confs_constrained(mol, template_mol, nconf, seed=42):
+    mol = AllChem.ConstrainedEmbed(Chem.AddHs(mol), template_mol, randomseed=seed)
+    ids = set(range(mol.GetNumAtoms())) - set(mol.GetSubstructMatch(template_mol))
+    ids = [i + 1 for i in ids]   # ids of atoms to rotate
+    mol_rdkit = mol
+
+    mol = pybel.readstring('mol', Chem.MolToMolBlock(mol)).OBMol   # convert mol from RDKit to OB
+
+    pff = ob.OBForceField_FindType("mmff94")
+    if not pff.Setup(mol):  # if OB FF setup fails use RDKit conformer generation (slower)
+        return __embed_multiple_confs_constrained_rdkit(mol_rdkit, template_mol, nconf, seed)
+
+    constraints = ob.OBFFConstraints()
+    for atom in ob.OBMolAtomIter(mol):
+        atom_id = atom.GetIndex() + 1
+        if atom_id not in ids:
+            constraints.AddAtomConstraint(atom_id)
+    pff.SetConstraints(constraints)
+
+    pff.DiverseConfGen(0.5, 1000, 50, False)   # rmsd, nconf_tries, energy, verbose
+
+    pff.GetConformers(mol)
+    obconversion = ob.OBConversion()
+    obconversion.SetOutFormat('sdf')
+
+    output_strings = []
+    for conf_num in range(max(0, mol.NumConformers() - nconf), mol.NumConformers()):   # save last nconf conformers (it seems the last one is the original conformer)
+        mol.SetConformer(conf_num)
+        output_strings.append(obconversion.WriteString(mol))
+
+    return ''.join(output_strings)
+
+
 def __gen_confs(mol, template_mol=None, nconf=10, seed=42):
-    mol = Chem.AddHs(mol)
     try:
         if template_mol:
             mol = __embed_multiple_confs_constrained(mol, template_mol, nconf, seed)
         else:
-            AllChem.EmbedMultipleConfs(mol, numConfs=nconf, maxAttempts=nconf*4, randomSeed=seed)
+            AllChem.EmbedMultipleConfs(Chem.AddHs(mol), numConfs=nconf, maxAttempts=nconf*4, randomSeed=seed)
     except ValueError:
         return None
-    return mol
+    return mol  # string if restrained or RDKit mol with multiple conformers if not restrained
 
 
 def append_generated_confs_file(mols, fname, template_mol=None, nconf=10, seed=42, pool=None):
@@ -133,25 +168,29 @@ def append_generated_confs_file(mols, fname, template_mol=None, nconf=10, seed=4
         if pool:
             for mol in pool.imap_unordered(partial(__gen_confs, template_mol=template_mol, nconf=nconf, seed=seed), mols):
                 if mol:
-                    for c in mol.GetConformers():
-                        w.write(mol, c.GetId())
+                    if isinstance(mol, Chem.Mol):
+                        for c in mol.GetConformers():
+                            w.write(mol, c.GetId())
+                    else:
+                        f.write(mol)
         else:
             for mol in mols:
                 mol = __gen_confs(mol, template_mol=template_mol, nconf=nconf, seed=seed)
                 if mol:
-                    for c in mol.GetConformers():
-                        w.write(mol, c.GetId())
+                    if isinstance(mol, Chem.Mol):
+                        for c in mol.GetConformers():
+                            w.write(mol, c.GetId())
+                    else:
+                        f.write(mol)
         w.close()
 
 
-def create_db(fname, dbname, ncpu=1):
-    subprocess.run(['/home/pavel/pharmit/pharmit/src/build/pharmit',
-                    'dbcreate', '-dbdir', dbname, '-in', fname, '-nthreads', str(ncpu)])
+def create_db(fname, dbname, pharmit_path, ncpu=1):
+    subprocess.run([pharmit_path, 'dbcreate', '-dbdir', dbname, '-in', fname, '-nthreads', str(ncpu)])
 
 
-def search_db(dbname, query_fname, out_fname, ncpu=1):
-    subprocess.run(['/home/pavel/pharmit/pharmit/src/build/pharmit',
-                    'dbsearch', '-dbdir', dbname, '-in', query_fname, '-out', out_fname,
+def search_db(dbname, query_fname, out_fname, pharmit_path, ncpu=1):
+    subprocess.run([pharmit_path, 'dbsearch', '-dbdir', dbname, '-in', query_fname, '-out', out_fname,
                     '-reduceconfs', '1', '-sort-rmsd', '-nthreads', str(ncpu)])
 
 
@@ -179,7 +218,7 @@ def get_grow_points(mol, pharm_xyz, tol=2):
     return ids.tolist()
 
 
-def screen(dbdir, pharmacophore, pids, new_pids, iteration, output_dir, ncpu, pd_search):
+def screen(dbdir, pharmacophore, pids, new_pids, iteration, output_dir, ncpu, pharmit_path, pd_search):
     # screen db against pharmacophore and if no matches screen its subpharmacopohres till the minimum size
     flag = False
     for i in reversed(range(1, len(new_pids) + 1)):
@@ -188,7 +227,7 @@ def screen(dbdir, pharmacophore, pids, new_pids, iteration, output_dir, ncpu, pd
             p_fname = os.path.join(output_dir, f'iter{iteration}-p{len(cur_pids)}-model{j}.json')
             pharmacophore.write_model(p_fname, ids=cur_pids)
             found_poses_fname = os.path.splitext(p_fname)[0] + '_found.sdf'
-            search_db(dbdir, p_fname, found_poses_fname, ncpu=ncpu)
+            search_db(dbdir, p_fname, found_poses_fname, pharmit_path=pharmit_path, ncpu=ncpu)
             if sdf_not_empty(found_poses_fname):
                 pd_search.loc[pd_search.shape[0]] = [iteration, cur_pids, found_poses_fname]
                 flag = True
@@ -214,10 +253,13 @@ def main():
                              'This can also be pharmit database with precomputed conformers.')
     parser.add_argument('-d', '--db', metavar='FILENAME', required=True,
                         help='database with interchangeable fragments.')
-    parser.add_argument('-n', '--nconf', metavar='INTEGER', required=False, type=int, default=100,
-                        help='number of conformers generated per structure. Default: 100.')
+    parser.add_argument('-n', '--nconf', metavar='INTEGER', required=False, type=int, default=20,
+                        help='number of conformers generated per structure. Default: 20.')
     parser.add_argument('-s', '--seed', metavar='INTEGER', required=False, type=int, default=-1,
                         help='seed for random number generator to get reproducible output. Default: -1.')
+    parser.add_argument('-p', '--pharmit', metavar='pharmit executable', required=False, type=str,
+                        default='/home/pavel/pharmit/pharmit/src/build/pharmit',
+                        help='path to pharmit executable.')
     parser.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
                         help='number of cpu cores to use. Default: 1.')
 
@@ -297,14 +339,14 @@ def main():
                             append_generated_confs_file(new_mols, fname=conf_fname, template_mol=mol, nconf=args.nconf,
                                                         pool=pool, seed=args.seed)
                 db_dname = os.path.join(args.output, f'iter{iteration}_db')
-                create_db(conf_fname, db_dname, ncpu=args.ncpu)
+                create_db(conf_fname, db_dname, pharmit_path=args.pharmit, ncpu=args.ncpu)
 
         flags = []
         for rowid in np.where(pd_search['iteration'] == iteration - 1):
             print(pd_search.iloc[rowid]['feature_ids'].values[0], new_pids)
             flag = screen(dbdir=db_dname, pharmacophore=p, pids=pd_search.iloc[rowid]['feature_ids'].values[0],
                           new_pids=new_pids, iteration=iteration, output_dir=args.output, ncpu=args.ncpu,
-                          pd_search=pd_search)
+                          pd_search=pd_search, pharmit_path=args.pharmit)
             flags.append(flag)
         if any(flags):
             iteration += 1
