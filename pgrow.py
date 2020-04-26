@@ -132,14 +132,17 @@ def __embed_multiple_confs_constrained(mol, template_mol, nconf, seed=42):
 
     pff.GetConformers(mol)
     obconversion = ob.OBConversion()
-    obconversion.SetOutFormat('sdf')
+    obconversion.SetOutFormat('mol')
 
     output_strings = []
     for conf_num in range(max(0, mol.NumConformers() - nconf), mol.NumConformers()):   # save last nconf conformers (it seems the last one is the original conformer)
         mol.SetConformer(conf_num)
         output_strings.append(obconversion.WriteString(mol))
 
-    return ''.join(output_strings)
+    out_mol = Chem.MolFromMolBlock(output_strings[0])
+    for a in output_strings[1:]:
+        out_mol.AddConformer(Chem.MolFromMolBlock(a).GetConformer(0), assignId=True)
+    return out_mol
 
 
 def __gen_confs(mol, template_mol=None, nconf=10, seed=42):
@@ -150,7 +153,7 @@ def __gen_confs(mol, template_mol=None, nconf=10, seed=42):
             AllChem.EmbedMultipleConfs(Chem.AddHs(mol), numConfs=nconf, maxAttempts=nconf*4, randomSeed=seed)
     except ValueError:
         return None
-    return mol  # string if restrained or RDKit mol with multiple conformers if not restrained
+    return mol
 
 
 def append_generated_confs_file(mols, fname, template_mol=None, nconf=10, seed=42, pool=None):
@@ -169,20 +172,14 @@ def append_generated_confs_file(mols, fname, template_mol=None, nconf=10, seed=4
         if pool:
             for mol in pool.imap_unordered(partial(__gen_confs, template_mol=template_mol, nconf=nconf, seed=seed), mols):
                 if mol:
-                    if isinstance(mol, Chem.Mol):
-                        for c in mol.GetConformers():
-                            w.write(mol, c.GetId())
-                    else:
-                        f.write(mol)
+                    for c in mol.GetConformers():
+                        w.write(mol, c.GetId())
         else:
             for mol in mols:
                 mol = __gen_confs(mol, template_mol=template_mol, nconf=nconf, seed=seed)
                 if mol:
-                    if isinstance(mol, Chem.Mol):
-                        for c in mol.GetConformers():
-                            w.write(mol, c.GetId())
-                    else:
-                        f.write(mol)
+                    for c in mol.GetConformers():
+                        w.write(mol, c.GetId())
         w.close()
 
 
