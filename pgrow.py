@@ -6,6 +6,7 @@ import os
 import subprocess
 import shutil
 import random
+import operator
 from sklearn.cluster import AgglomerativeClustering
 from collections import defaultdict
 from multiprocessing import Pool
@@ -195,10 +196,13 @@ def search_db(dbname, query_fname, out_fname, pharmit_path, ncpu=1):
 
 
 def sdf_not_empty(fname):
-    for m in Chem.SDMolSupplier(fname):
-        if m:
-            return True
-    return False
+    try:
+        for m in Chem.SDMolSupplier(fname):
+            if m:
+                return True
+        return False
+    except OSError:
+        return False
 
 
 def select_compounds(fname):
@@ -229,11 +233,30 @@ def screen(dbdir, pharmacophore, pids, new_pids, iteration, output_dir, ncpu, ph
             found_poses_fname = os.path.splitext(p_fname)[0] + '_found.sdf'
             search_db(dbdir, p_fname, found_poses_fname, pharmit_path=pharmit_path, ncpu=ncpu)
             if sdf_not_empty(found_poses_fname):
-                pd_search.loc[pd_search.shape[0]] = [iteration, cur_pids, found_poses_fname]
+                pd_search.loc[pd_search.shape[0]] = [iteration, cur_pids, found_poses_fname, None]
                 flag = True
+            else:
+                pd_search.loc[pd_search.shape[0]] = [iteration, cur_pids, None, None]
         if flag:
             break
     return flag
+
+
+def select(iteration, pd_search):
+    N = 20
+    for rowid in np.where(pd_search['iteration'] == iteration):
+        in_fname = pd_search.loc[rowid, 'found_sdf'].values[0]
+        if in_fname is None:
+            continue
+        out_fname = os.path.splitext(in_fname)[0] + '_selected.sdf'
+        pd_search.loc[rowid, 'selected_sdf'] = out_fname
+        mols = [(mol.GetNumHeavyAtoms(), mol) for mol in Chem.SDMolSupplier(in_fname)]
+        min_hac = min(i for i, j in mols)
+        w = Chem.SDWriter(out_fname)
+        for i, (hac, mol) in enumerate(sorted(mols, key=operator.itemgetter(0))):
+            if i <= N or mol.GetNumHeavyAtoms() <= min_hac:
+                w.write(mol)
+        w.close()
 
 
 def main():
@@ -278,7 +301,7 @@ def main():
     args.ids = tuple(sorted(set(args.ids)))
 
     # tree_search = defaultdict(dict)  # {iteration_number: {pids: sdf_fname, pids: sdf_fname, ...}, ...}
-    pd_search = pd.DataFrame(columns=['iteration', 'feature_ids', 'found_sdf'])
+    pd_search = pd.DataFrame(columns=['iteration', 'feature_ids', 'found_sdf', 'selected_sdf'])
 
     p = PharmModel(args.query)
     p.set_clusters(args.clustering_threshold)
@@ -298,10 +321,10 @@ def main():
         db_dname = args.fragments
     else:
         db_dname = os.path.join(args.output, f'iter{iteration}_db')
-        create_db(conf_fname, db_dname, ncpu=args.ncpu)
+        create_db(conf_fname, db_dname, pharmit_path=args.pharmit, ncpu=args.ncpu)
 
     new_pids = tuple(args.ids)
-    pd_search.loc[0] = [-1, tuple(), '']
+    pd_search.loc[0] = [-1, tuple(), None, None]
 
     while True:
 
@@ -319,7 +342,10 @@ def main():
             # subsets of features (these subsets will substantially intersect)
             read_smi = set()
             for i, rowid in enumerate(np.where(pd_search['iteration'] == iteration - 1)):
-                for j, mol in enumerate(Chem.SDMolSupplier(pd_search.iloc[rowid]['found_sdf'].values[0])):
+                fname = pd_search.iloc[rowid]['selected_sdf'].values[0]
+                if fname is None:
+                    continue
+                for j, mol in enumerate(Chem.SDMolSupplier(fname)):
                     if mol:
                         smi = Chem.MolToSmiles(mol)
                         if smi not in read_smi:
@@ -347,6 +373,7 @@ def main():
             flag = screen(dbdir=db_dname, pharmacophore=p, pids=pd_search.iloc[rowid]['feature_ids'].values[0],
                           new_pids=new_pids, iteration=iteration, output_dir=args.output, ncpu=args.ncpu,
                           pd_search=pd_search, pharmit_path=args.pharmit)
+            select(iteration, pd_search)
             flags.append(flag)
         if any(flags):
             iteration += 1
