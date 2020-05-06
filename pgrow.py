@@ -126,9 +126,16 @@ class PharmModel:
 
     def write_model(self, fname, ids=None):
         ids = self.__get_ids(ids)
-        p = [self.p[i] for i in set(ids)]
+        p = [self.p[i] for i in ids]
         p = {'points': p}
         json.dump(p, open(fname, 'wt'))
+
+    def write_model_xyz(self, fname, ids=None):
+        ids = self.__get_ids(ids)
+        with open(fname, 'wt') as f:
+            f.write('\n\n')
+            for i in ids:
+                f.write(' '.join(map(str, (self.p[i]['name'], self.p[i]['x'], self.p[i]['y'], self.p[i]['z']))) + '\n')
 
 
 def load_frags(fname):
@@ -283,6 +290,8 @@ def screen(dbdir, pharmacophore, pids, new_pids, iteration, output_dir, ncpu, ph
             cur_pids = tuple(sorted(set(pids + new_pids_subset)))
             p_fname = os.path.join(output_dir, f'iter{iteration}-p{len(cur_pids)}-model{j}.json')
             pharmacophore.write_model(p_fname, ids=cur_pids)
+            p_fname_xyz = os.path.join(output_dir, f'iter{iteration}-p{len(cur_pids)}-model{j}.xyz')
+            pharmacophore.write_model_xyz(p_fname_xyz, ids=cur_pids)
             found_poses_fname = os.path.splitext(p_fname)[0] + '_found.sdf'
             search_db(dbdir, p_fname, found_poses_fname, pharmit_path=pharmit_path, ncpu=ncpu)
             if sdf_not_empty(found_poses_fname):
@@ -333,9 +342,10 @@ def get_confs(mol, template_mol, pharm_coords, dist, nconf, seed):
             conf_coords = pd.DataFrame([(label, *xyz) for label, xyz in conf_coords], columns=['label', 'x', 'y', 'z'])
             res = []
             for lb in labels:
-                res.append(np.min(cdist(conf_coords.loc[conf_coords.label == lb, ['x', 'y', 'z']],
-                                        pharm_coords.loc[pharm_coords.label == lb, ['x', 'y', 'z']]),
-                                  axis=0)[0])
+                if lb in conf_coords.label:
+                    res.append(np.min(cdist(conf_coords.loc[conf_coords.label == lb, ['x', 'y', 'z']],
+                                            pharm_coords.loc[pharm_coords.label == lb, ['x', 'y', 'z']]),
+                                      axis=0)[0])
             dists.append(res)
         dists = np.array(dists)
         # remove conformers which can not fit
