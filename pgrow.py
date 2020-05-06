@@ -236,8 +236,11 @@ def append_generated_confs_file(mols, fname, template_mol=None, nconf=10, seed=4
         w.close()
 
 
-def create_db(fname, dbname, pharmit_path, ncpu=1):
-    subprocess.run([pharmit_path, 'dbcreate', '-dbdir', dbname, '-in', fname, '-nthreads', str(ncpu)])
+def create_db(fname, dbname, pharmit_path, pharmit_spec, ncpu=1):
+    a = [pharmit_path, 'dbcreate', '-dbdir', dbname, '-in', fname, '-nthreads', str(ncpu)]
+    if pharmit_spec is not None:
+        a.extend(['-pharmaspec', pharmit_spec])
+    subprocess.run(a)
 
 
 def search_db(dbname, query_fname, out_fname, pharmit_path, ncpu=1):
@@ -309,7 +312,7 @@ def select(iteration, pd_search):
         w.close()
 
 
-def get_confs_and_dists(mol, template_mol, pharm_coords, dist, nconf, seed):
+def get_confs(mol, template_mol, pharm_coords, dist, nconf, seed):
     """
 
     :param mol: RDKit Mol
@@ -334,24 +337,16 @@ def get_confs_and_dists(mol, template_mol, pharm_coords, dist, nconf, seed):
                                         pharm_coords.loc[pharm_coords.label == lb, ['x', 'y', 'z']]),
                                   axis=0)[0])
             dists.append(res)
-        dists = pd.DataFrame(dists)
-        print(mol.GetProp('_Name'))
-        print(dists)
-        print(pharm_coords)
-        print(pharm_coords.loc[:, 'id'])
-        dists.columns = pharm_coords.loc[:, 'id']
+        dists = np.array(dists)
         # remove conformers which can not fit
-        # remove_cids = np.where((dists > dist).all(axis=1))[0]
-        # remove_cids = list(map(int, remove_cids))
-        # if remove_cids:
-        #     if len(remove_cids) == mol.GetNumConformers():
-        #         mol = None
-        #         dists = None
-        #     else:
-        #         mol = remove_conf(mol, remove_cids)
-        #         dists.drop(index=remove_cids, inplace=True)
-        #         dists.index = range(dists.shape[0])
-    return mol, dists
+        remove_cids = np.where((dists > dist).all(axis=1))[0]
+        if remove_cids.size:
+            if remove_cids.shape[0] == mol.GetNumConformers():
+                mol = None
+            else:
+                remove_cids = list(map(int, remove_cids))
+                mol = remove_conf(mol, remove_cids)
+    return mol
 
 
 def remove_conf(mol, cids):
@@ -437,6 +432,8 @@ def main():
     parser.add_argument('-p', '--pharmit', metavar='pharmit executable', required=False, type=str,
                         default='/home/pavel/pharmit/pharmit/src/build/pharmit',
                         help='path to pharmit executable.')
+    parser.add_argument('-a', '--pharmit_spec', metavar='FILENAME', required=False, type=str, default=None,
+                        help='path to file with pharmacophore specifications in pharmit format.')
     parser.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
                         help='number of cpu cores to use. Default: 1.')
 
@@ -475,7 +472,7 @@ def main():
         db_dname = args.fragments
     else:
         db_dname = os.path.join(args.output, f'iter{iteration}_db')
-        create_db(conf_fname, db_dname, pharmit_path=args.pharmit, ncpu=args.ncpu)
+        create_db(conf_fname, db_dname, pharmit_path=args.pharmit, pharmit_spec=args.pharmit_spec, ncpu=args.ncpu)
 
     new_pids = tuple(args.ids)
     pd_search.loc[0] = [-1, tuple(), None, None]
@@ -494,14 +491,18 @@ def main():
         # new_pids will be the same for different lines from the same iteration because only a cluster with
         # non intersected feature ids can be selected
         new_pids = p.select_nearest_cluster(pd_search.loc[pd_search['iteration'] == iteration - 1].iloc[0]['feature_ids'])
+
+        # if no new features then exit
+        if not new_pids:
+            break
+
         new_xyz = p.xyz(new_pids)
         new_pharm_coords = p.get_feature_coords(new_pids)
 
         # all generated compounds are stored in a single file, however their parent compounds could match different
         # subsets of features. This was done due to fast screening, so we will not lose much time, but greatly
         # simplify manipulation with data
-        conf_fname = os.path.join(args.output, f'iter{iteration}.dat')
-        db = DB(conf_fname)
+        conf_fname = os.path.join(args.output, f'iter{iteration}.sdf')
 
         for i, rowid in enumerate(np.where(pd_search['iteration'] == iteration - 1)):
 
@@ -525,35 +526,34 @@ def main():
                     new_mols += [parent_mol]
 
                     # add to file molecule and distances to new pharmacophore features
-                    if pool:
-                        for mol, dists in pool.imap_unordered(partial(get_confs_and_dists,
-                                                                      template_mol=parent_mol,
-                                                                      nconf=args.nconf,
-                                                                      seed=args.seed,
-                                                                      dist=args.dist,
-                                                                      pharm_coords=new_pharm_coords),
-                                                              new_mols):
+                    with open(conf_fname, 'at') as f:
+                        w = Chem.SDWriter(f)
+                        if pool:
+                            generator = pool.imap_unordered(partial(get_confs,
+                                                                    template_mol=parent_mol,
+                                                                    nconf=args.nconf,
+                                                                    seed=args.seed,
+                                                                    dist=args.dist,
+                                                                    pharm_coords=new_pharm_coords), new_mols)
+                        else:
+                            generator = (get_confs(mol, parent_mol, pharm_coords=new_pharm_coords,
+                                                   nconf=args.nconf, dist=args.dist, seed=args.seed)
+                                         for mol in new_mols)
+                        for mol in generator:
                             if mol:
-                                db.write(mol.GetProp('_Name'), mol, dists)
-                    else:
-                        for mol in new_mols:
-                            mol, dists = get_confs_and_dists(mol, parent_mol, pharm_coords=new_pharm_coords,
-                                                             nconf=args.nconf, dist=args.dist, seed=args.seed)
-                            if mol:
-                                db.write(mol.GetProp('_Name'), mol, dists)
+                                for i in range(mol.GetNumConformers()):
+                                    w.write(mol, i)
+                        w.close()
 
-            # db_dname = os.path.join(args.output, f'iter{iteration}_db')
-            # create_db(conf_fname, db_dname, pharmit_path=args.pharmit, ncpu=args.ncpu)
+        db_dname = os.path.join(args.output, f'iter{iteration}_db')
+        create_db(conf_fname, db_dname, pharmit_path=args.pharmit, pharmit_spec=args.pharmit_spec, ncpu=args.ncpu)
 
         flags = []
         for rowid in np.where(pd_search['iteration'] == iteration - 1):
             print(pd_search.iloc[rowid]['feature_ids'].values[0], new_pids)
-            flag = screen_simple(db=db, pharmacophore=p, pids=pd_search.iloc[rowid]['feature_ids'].values[0],
-                                 new_pids=new_pids, iteration=iteration, output_dir=args.output, dist=args.dist,
-                                 pd_search=pd_search)
-            # flag = screen(dbdir=db_dname, pharmacophore=p, pids=pd_search.iloc[rowid]['feature_ids'].values[0],
-            #               new_pids=new_pids, iteration=iteration, output_dir=args.output, ncpu=args.ncpu,
-            #               pd_search=pd_search, pharmit_path=args.pharmit)
+            flag = screen(dbdir=db_dname, pharmacophore=p, pids=pd_search.iloc[rowid]['feature_ids'].values[0],
+                          new_pids=new_pids, iteration=iteration, output_dir=args.output, ncpu=args.ncpu,
+                          pd_search=pd_search, pharmit_path=args.pharmit)
             select(iteration, pd_search)
             flags.append(flag)
         if any(flags):
