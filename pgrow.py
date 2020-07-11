@@ -19,6 +19,9 @@ import shelve
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from rdkit.Chem.AllChem import AlignMol, EmbedMolecule, EmbedMultipleConfs
+from rdkit.Chem.rdForceFieldHelpers import UFFGetMoleculeForceField
+from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
 from crem.crem import grow_mol, grow_mol2
 from openbabel import openbabel as ob
 from openbabel import pybel
@@ -101,10 +104,11 @@ class PharmModel:
         m = np.array([(self.p[i]['x'], self.p[i]['y'], self.p[i]['z']) for i in ids])
         return m
 
-    def set_clusters(self, clustering_threshold):
-        c = AgglomerativeClustering(n_clusters=None, distance_threshold=clustering_threshold).fit(self.xyz())
+    def set_clusters(self, clustering_threshold, ids=None):
+        ids = tuple(set(self.__get_ids()) - set(ids))
+        c = AgglomerativeClustering(n_clusters=None, distance_threshold=clustering_threshold).fit(self.xyz(ids))
         for i, j in enumerate(c.labels_):
-            self.clusters[j].add(i)
+            self.clusters[j].add(ids[i])
 
     def select_nearest_cluster(self, ids):
 
@@ -138,6 +142,15 @@ class PharmModel:
                 f.write(' '.join(map(str, (self.p[i]['name'], self.p[i]['x'], self.p[i]['y'], self.p[i]['z']))) + '\n')
 
 
+def gen_stereo(mol):
+    stereo_opts = StereoEnumerationOptions(tryEmbedding=True, maxIsomers=32)
+    for b in mol.GetBonds():
+        if b.GetStereo() == Chem.rdchem.BondStereo.STEREOANY:
+            b.SetStereo(Chem.rdchem.BondStereo.STEREONONE)
+    isomers = tuple(EnumerateStereoisomers(mol, options=stereo_opts))
+    return isomers
+
+
 def load_frags(fname):
     res = []
     with open(fname) as f:
@@ -153,6 +166,63 @@ def load_frags(fname):
                     mol.SetProp('_Name', name)
                     res.append(mol)
     return res
+
+
+def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreConfId=-1, randomseed=2342,
+                                  getForceField=UFFGetMoleculeForceField, **kwargs):
+
+    match = mol.GetSubstructMatch(core)
+    if not match:
+        raise ValueError("molecule doesn't match the core")
+    coordMap = {}
+    coreConf = core.GetConformer(coreConfId)
+    for i, idxI in enumerate(match):
+        corePtI = coreConf.GetAtomPosition(i)
+        coordMap[idxI] = corePtI
+
+    cids = EmbedMultipleConfs(mol, numConfs=numConfs, coordMap=coordMap, randomSeed=randomseed, **kwargs)
+    cids = list(cids)
+    if len(cids) == 0:
+        raise ValueError('Could not embed molecule.')
+
+    algMap = [(j, i) for i, j in enumerate(match)]
+
+    if not useTethers:
+        # clean up the conformation
+        for cid in cids:
+            ff = getForceField(mol, confId=cid)
+            for i, idxI in enumerate(match):
+                for j in range(i + 1, len(match)):
+                    idxJ = match[j]
+                    d = coordMap[idxI].Distance(coordMap[idxJ])
+                    ff.AddDistanceConstraint(idxI, idxJ, d, d, 100.)
+            ff.Initialize()
+            n = 4
+            more = ff.Minimize()
+            while more and n:
+                more = ff.Minimize()
+                n -= 1
+            # rotate the embedded conformation onto the core:
+            rms = AlignMol(mol, core, atomMap=algMap)
+    else:
+        # rotate the embedded conformation onto the core:
+        for cid in cids:
+            rms = AlignMol(mol, core, prbCid=cid, atomMap=algMap)
+            ff = getForceField(mol, confId=cid)
+            conf = core.GetConformer()
+            for i in range(core.GetNumAtoms()):
+                p = conf.GetAtomPosition(i)
+                pIdx = ff.AddExtraPoint(p.x, p.y, p.z, fixed=True) - 1
+                ff.AddDistanceConstraint(pIdx, match[i], 0, 0, 100.)
+            ff.Initialize()
+            n = 4
+            more = ff.Minimize(energyTol=1e-4, forceTol=1e-3)
+            while more and n:
+                more = ff.Minimize(energyTol=1e-4, forceTol=1e-3)
+                n -= 1
+            # realign
+            rms = AlignMol(mol, core, prbCid=cid, atomMap=algMap)
+    return mol
 
 
 def __embed_multiple_confs_constrained_rdkit(mol, template_mol, nconf, seed=42):
@@ -208,7 +278,7 @@ def __embed_multiple_confs_constrained(mol, template_mol, nconf, seed=42):
 def __gen_confs(mol, template_mol=None, nconf=10, seed=42):
     try:
         if template_mol:
-            mol = __embed_multiple_confs_constrained(mol, template_mol, nconf, seed)
+            mol = ConstrainedEmbedMultipleConfs(mol, template_mol, nconf, randomseed=seed)
         else:
             AllChem.EmbedMultipleConfs(Chem.AddHs(mol), numConfs=nconf, maxAttempts=nconf*4, randomSeed=seed)
     except ValueError:
@@ -305,7 +375,7 @@ def screen(dbdir, pharmacophore, pids, new_pids, iteration, output_dir, ncpu, ph
 
 
 def select(iteration, pd_search):
-    N = 20
+    N = 10
     for rowid in np.where(pd_search['iteration'] == iteration):
         in_fname = pd_search.loc[rowid, 'found_sdf'].values[0]
         if in_fname is None:
@@ -332,6 +402,9 @@ def get_confs(mol, template_mol, pharm_coords, dist, nconf, seed):
     :param nconf: number of conformers
     :return: mol with suitable conformers or None if no conformer matches
     """
+
+    # print(mol.GetProp('_Name'))
+
     dists = []
     labels = pharm_coords['label'].unique().tolist()
     mol = __gen_confs(mol, template_mol, nconf=nconf, seed=seed)
@@ -342,7 +415,7 @@ def get_confs(mol, template_mol, pharm_coords, dist, nconf, seed):
             conf_coords = pd.DataFrame([(label, *xyz) for label, xyz in conf_coords], columns=['label', 'x', 'y', 'z'])
             res = []
             for lb in labels:
-                if lb in conf_coords.label:
+                if lb in conf_coords.label.values:
                     res.append(np.min(cdist(conf_coords.loc[conf_coords.label == lb, ['x', 'y', 'z']],
                                             pharm_coords.loc[pharm_coords.label == lb, ['x', 'y', 'z']]),
                                       axis=0)[0])
@@ -354,6 +427,7 @@ def get_confs(mol, template_mol, pharm_coords, dist, nconf, seed):
             if remove_cids.shape[0] == mol.GetNumConformers():
                 mol = None
             else:
+                print(dists)
                 remove_cids = list(map(int, remove_cids))
                 mol = remove_conf(mol, remove_cids)
     return mol
@@ -465,9 +539,13 @@ def main():
     pd_search = pd.DataFrame(columns=['iteration', 'feature_ids', 'found_sdf', 'selected_sdf'])
 
     p = PharmModel(args.query)
-    p.set_clusters(args.clustering_threshold)
+    p.set_clusters(args.clustering_threshold, args.ids)
 
     print(p.clusters)
+
+    # p.write_model_xyz('/home/pavel/tmp/pharmit/2c6o/new_run/pharmit.xyz')
+
+    # exit()
 
     iteration = 0
 
@@ -496,6 +574,8 @@ def main():
     select(iteration, pd_search)
     iteration = 1
 
+    stereo_opts = StereoEnumerationOptions(tryEmbedding=True, maxIsomers=32)
+
     while True:
 
         # new_pids will be the same for different lines from the same iteration because only a cluster with
@@ -508,6 +588,9 @@ def main():
 
         new_xyz = p.xyz(new_pids)
         new_pharm_coords = p.get_feature_coords(new_pids)
+
+        print(new_pids)
+        print(new_pharm_coords)
 
         # all generated compounds are stored in a single file, however their parent compounds could match different
         # subsets of features. This was done due to fast screening, so we will not lose much time, but greatly
@@ -523,17 +606,19 @@ def main():
             for j, parent_mol in enumerate(Chem.SDMolSupplier(fname)):
                 if parent_mol:
                     replace_ids = get_grow_points(parent_mol, new_xyz)
-                    new_mols = list(grow_mol(parent_mol, args.db, radius=3, min_atoms=1, max_atoms=8,
+                    new_mols = list(grow_mol(parent_mol, args.db, radius=2, min_atoms=1, max_atoms=12,
                                              max_replacements=None, replace_ids=replace_ids, return_mol=True,
                                              ncores=args.ncpu))
-                    new_mols = [item[1] for item in new_mols]
-                    for k, new_mol in enumerate(new_mols):
+                    new_isomers = []
+                    for isomers in pool.imap_unordered(gen_stereo, (m[1] for m in new_mols)):
+                        new_isomers.extend(isomers)
+                    for k, new_mol in enumerate(new_isomers):
                         new_mol.SetProp('_Name', f'mol-{iteration}-{str(j).zfill(5)}-{str(k).zfill(6)}')
 
                     # add parent compounds with the same conformation, because it may accidentally match
-                    # a large subset of features. But since we do not change its conformation this would be
+                    # a larger subset of features. But since we do not change its conformation this would be
                     # unlikely
-                    new_mols += [parent_mol]
+                    new_mols = new_isomers + [parent_mol]
 
                     # add to file molecule and distances to new pharmacophore features
                     with open(conf_fname, 'at') as f:
@@ -554,6 +639,8 @@ def main():
                                 for i in range(mol.GetNumConformers()):
                                     w.write(mol, i)
                         w.close()
+
+        print(f'{conf_fname} was created')
 
         db_dname = os.path.join(args.output, f'iter{iteration}_db')
         create_db(conf_fname, db_dname, pharmit_path=args.pharmit, pharmit_spec=args.pharmit_spec, ncpu=args.ncpu)
