@@ -1,113 +1,32 @@
 #!/usr/bin/env python3
 
 import argparse
-import json
 import os
-import subprocess
-import shutil
 import pickle
-import random
 import operator
 from sklearn.cluster import AgglomerativeClustering
 from collections import defaultdict
 from multiprocessing import Pool
 from functools import partial
 from scipy.spatial.distance import cdist
-from itertools import combinations
+from itertools import combinations, product
 from operator import itemgetter
 import numpy as np
 from numpy.linalg import norm
 import pandas as pd
-import shelve
+import sqlite3
+import time
 
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolDescriptors
-from rdkit.Chem.AllChem import AlignMol, EmbedMolecule, EmbedMultipleConfs
+from rdkit.Chem.AllChem import AlignMol, EmbedMultipleConfs
 from rdkit.Chem.rdForceFieldHelpers import UFFGetMoleculeForceField
 from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
-from crem.crem import grow_mol, grow_mol2
-# from openbabel import openbabel as ob
-# from openbabel import pybel
+from crem.crem import grow_mol
 from pmapper.utils import load_multi_conf_mol
 from pmapper.pharmacophore import Pharmacophore as P
 from psearch.database import DB
 from read_input import read_input
-
-
-class PharmModel:
-
-    __replace_names = {'Aromatic': 'a', 'HydrogenDonor': 'D', 'HydrogenAcceptor': 'A',
-                       'Hydrophobic': 'H', 'PositiveIon': 'P', 'NegativeIon': 'N'}
-
-    def __init__(self, fname):
-        p = json.load(open(fname))['points']
-        self.p = [i for i in p if i['enabled']]
-        self.clusters = defaultdict(set)
-
-    def __get_ids(self, ids=None):
-        if ids:
-            return tuple(sorted(set(ids)))
-        else:
-            return tuple(range(len(self.p)))
-
-    def get_feature_coords(self, ids=None):
-        ids = self.__get_ids(ids)
-        coords = [(i, PharmModel.__replace_names[self.p[i]['name']], self.p[i]['x'], self.p[i]['y'], self.p[i]['z']) for i in ids]
-        coords = pd.DataFrame(coords, columns=['id', 'label', 'x', 'y', 'z'])
-        # coords.sort_values(by='label', axis=1, inplace=True)
-        # coords.set_index(keys=['label'], drop=False, inplace=True)
-        return coords
-
-    def xyz(self, ids=None, cluster=None):
-        """
-
-        :param ids: list of feature ids or None (all features)
-        :param cluster: number of a cluster, if not None it has higher precedence than ids
-        :return: numpy array of shape (N, 3)
-        """
-        if cluster:
-            ids = self.clusters[cluster]
-        else:
-            ids = self.__get_ids(ids)
-        m = np.array([(self.p[i]['x'], self.p[i]['y'], self.p[i]['z']) for i in ids])
-        return m
-
-    def set_clusters(self, clustering_threshold, ids=None):
-        ids = tuple(set(self.__get_ids()) - set(ids))
-        c = AgglomerativeClustering(n_clusters=None, distance_threshold=clustering_threshold).fit(self.xyz(ids))
-        for i, j in enumerate(c.labels_):
-            self.clusters[j].add(ids[i])
-
-    def select_nearest_cluster(self, ids):
-
-        def min_distance(ids1, ids2):
-            xyz1 = self.xyz(ids1)
-            xyz2 = self.xyz(ids2)
-            return np.min(cdist(xyz1, xyz2))
-
-        ids = set(ids)
-        selected_ids = tuple()
-        min_dist = float('inf')
-        for k, v in self.clusters.items():
-            if not v & set(ids):
-                dist = min_distance(ids, v)
-                if dist < min_dist:
-                    min_dist = dist
-                    selected_ids = tuple(v)
-        return selected_ids
-
-    def write_model(self, fname, ids=None):
-        ids = self.__get_ids(ids)
-        p = [self.p[i] for i in ids]
-        p = {'points': p}
-        json.dump(p, open(fname, 'wt'))
-
-    def write_model_xyz(self, fname, ids=None):
-        ids = self.__get_ids(ids)
-        with open(fname, 'wt') as f:
-            f.write('\n\n')
-            for i in ids:
-                f.write(' '.join(map(str, (self.p[i]['name'], self.p[i]['x'], self.p[i]['y'], self.p[i]['z']))) + '\n')
 
 
 class PharmModel2(P):
@@ -115,6 +34,10 @@ class PharmModel2(P):
     def __init__(self, bin_step=1, cached=False):
         super().__init__(bin_step, cached)
         self.clusters = defaultdict(set)
+        self.exclvol = None
+
+    def get_num_features(self):
+        return len(self._get_ids())
 
     def get_xyz(self, ids):
         return np.array([xyz for label, xyz in self.get_feature_coords(ids)])
@@ -162,6 +85,26 @@ class PharmModel2(P):
         coords = pd.DataFrame(data, columns=['id', 'label', 'x', 'y', 'z'])
         return coords
 
+    def load_from_xyz(self, fname):
+        self.exclvol = []
+        with open(fname) as f:
+            feature_coords = []
+            f.readline()
+            line = f.readline().strip()
+            if line:
+                opts = dict(item.split('=') for item in line.split(';'))
+                if 'bin_step' in opts:
+                    self.update(bin_step=float(opts['bin_step']))
+            for line in f:
+                label, *coords = line.strip().split()
+                coords = tuple(map(float, coords))
+                if label != 'e':
+                    feature_coords.append((label, coords))
+                else:
+                    self.exclvol.append(coords)
+            self.load_from_feature_coords(tuple(feature_coords))
+        if self.exclvol:
+            self.exclvol = np.array(self.exclvol)
 
 
 def gen_stereo(mol):
@@ -171,23 +114,6 @@ def gen_stereo(mol):
             b.SetStereo(Chem.rdchem.BondStereo.STEREONONE)
     isomers = tuple(EnumerateStereoisomers(mol, options=stereo_opts))
     return isomers
-
-
-def load_frags(fname):
-    res = []
-    with open(fname) as f:
-        for i, line in enumerate(f):
-            items = line.strip().split()
-            if items:
-                mol = Chem.MolFromSmiles(items[0])
-                if mol:
-                    if len(items) == 1:
-                        name = f'mol-{i}'
-                    else:
-                        name = items[1]
-                    mol.SetProp('_Name', name)
-                    res.append(mol)
-    return res
 
 
 def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreConfId=-1, randomseed=2342,
@@ -247,56 +173,6 @@ def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreC
     return mol
 
 
-def __embed_multiple_confs_constrained_rdkit(mol, template_mol, nconf, seed=42):
-
-    new_confs = []
-    template_mol = Chem.RemoveHs(template_mol)
-    random.seed(seed)
-    seeds = random.sample(range(100000), nconf)
-    for i in seeds:
-        q = Chem.Mol(mol)
-        new_confs.append(AllChem.ConstrainedEmbed(q, template_mol, randomseed=i))
-    out_mol = new_confs[0]
-    for a in new_confs[1:]:
-        out_mol.AddConformer(a.GetConformer(0), assignId=True)
-    return out_mol
-
-
-# def __embed_multiple_confs_constrained(mol, template_mol, nconf, seed=42):
-#     mol_rdkit = AllChem.ConstrainedEmbed(Chem.AddHs(mol), template_mol, randomseed=seed)
-#     mol_rdkit = Chem.RemoveHs(mol_rdkit)
-#     ids = [i + 1 for i in mol_rdkit.GetSubstructMatch(template_mol)]   # ids of atoms to fix
-#
-#     mol = pybel.readstring('mol', Chem.MolToMolBlock(mol_rdkit)).OBMol   # convert mol from RDKit to OB
-#
-#     pff = ob.OBForceField_FindType("mmff94")
-#     if not pff.Setup(mol):  # if OB FF setup fails use RDKit conformer generation (slower)
-#         return __embed_multiple_confs_constrained_rdkit(mol_rdkit, template_mol, nconf, seed)
-#
-#     constraints = ob.OBFFConstraints()
-#     for atom in ob.OBMolAtomIter(mol):
-#         atom_id = atom.GetIndex() + 1
-#         if atom_id in ids:
-#             constraints.AddAtomConstraint(atom_id)
-#     pff.SetConstraints(constraints)
-#
-#     pff.DiverseConfGen(0.5, 1000, 50, False)   # rmsd, nconf_tries, energy, verbose
-#
-#     pff.GetConformers(mol)
-#     obconversion = ob.OBConversion()
-#     obconversion.SetOutFormat('mol')
-#
-#     output_strings = []
-#     for conf_num in range(max(0, mol.NumConformers() - nconf), mol.NumConformers()):   # save last nconf conformers (it seems the last one is the original conformer)
-#         mol.SetConformer(conf_num)
-#         output_strings.append(obconversion.WriteString(mol))
-#
-#     out_mol = Chem.MolFromMolBlock(output_strings[0])
-#     for a in output_strings[1:]:
-#         out_mol.AddConformer(Chem.MolFromMolBlock(a).GetConformer(0), assignId=True)
-#     return out_mol
-
-
 def __gen_confs(mol, template_mol=None, nconf=10, seed=42, **kwargs):
     try:
         if template_mol:
@@ -306,45 +182,6 @@ def __gen_confs(mol, template_mol=None, nconf=10, seed=42, **kwargs):
     except ValueError:
         return None
     return mol
-
-
-def append_generated_confs_file(mols, fname, template_mol=None, nconf=10, seed=42, pool=None):
-    """
-    Generate conformers and append them to sdf file
-    :param mols: list of mols
-    :param fname: sdf file name to save conformers
-    :param template_mol: RDKit Mol if constrained embedding should be done
-    :param nconf: number of generated conformers
-    :param seed: random seed to embed conformers
-    :param pool: multiprocessing pool to use multiple CPUs or None to use a single CPU
-    :return:
-    """
-    with open(fname, 'a') as f:
-        w = Chem.SDWriter(f)
-        if pool:
-            for mol in pool.imap_unordered(partial(__gen_confs, template_mol=template_mol, nconf=nconf, seed=seed), mols):
-                if mol:
-                    for c in mol.GetConformers():
-                        w.write(mol, c.GetId())
-        else:
-            for mol in mols:
-                mol = __gen_confs(mol, template_mol=template_mol, nconf=nconf, seed=seed)
-                if mol:
-                    for c in mol.GetConformers():
-                        w.write(mol, c.GetId())
-        w.close()
-
-
-def create_db(fname, dbname, pharmit_path, pharmit_spec, ncpu=1):
-    a = [pharmit_path, 'dbcreate', '-dbdir', dbname, '-in', fname, '-nthreads', str(ncpu)]
-    if pharmit_spec is not None:
-        a.extend(['-pharmaspec', pharmit_spec])
-    subprocess.run(a)
-
-
-def search_db(dbname, query_fname, out_fname, pharmit_path, ncpu=1):
-    subprocess.run([pharmit_path, 'dbsearch', '-dbdir', dbname, '-in', query_fname, '-out', out_fname,
-                    '-reduceconfs', '1', '-sort-rmsd', '-nthreads', str(ncpu)])
 
 
 def sdf_not_empty(fname):
@@ -357,72 +194,23 @@ def sdf_not_empty(fname):
         return False
 
 
-def select_compounds(fname):
-    mols = []
-    for m in Chem.SDMolSupplier(fname):
-        if m:
-            mols.append((m.GetNumHeavyAtoms(), m))
-    min_hac = min((item[0] for item in mols))
-    mols = [item[1] for item in mols if item[0] <= min_hac + 2]
-    return mols
-
-
-def get_grow_points(mol, pharm_xyz, tol=2):
-    mol_xyz = mol.GetConformer().GetPositions()
-    dist = np.min(cdist(mol_xyz, pharm_xyz), axis=1)
-    ids = np.flatnonzero(dist <= (np.min(dist) + tol))
-    return ids.tolist()
-
-
 def get_grow_points2(mol_xyz, pharm_xyz, tol=2):
     dist = np.min(cdist(mol_xyz, pharm_xyz), axis=1)
     ids = np.flatnonzero(dist <= (np.min(dist) + tol))
     return ids.tolist()
 
 
-def screen(dbdir, pharmacophore, pids, new_pids, iteration, output_dir, ncpu, pharmit_path, pd_search):
-    # screen db against pharmacophore and if no matches screen its subpharmacopohres till the minimum size
-    flag = False
-    for i in reversed(range(1, len(new_pids) + 1)):
-        for j, new_pids_subset in enumerate(combinations(new_pids, i)):
-            cur_pids = tuple(sorted(set(pids + new_pids_subset)))
-            p_fname = os.path.join(output_dir, f'iter{iteration}-p{len(cur_pids)}-model{j}.json')
-            pharmacophore.write_model(p_fname, ids=cur_pids)
-            p_fname_xyz = os.path.join(output_dir, f'iter{iteration}-p{len(cur_pids)}-model{j}.xyz')
-            pharmacophore.write_model_xyz(p_fname_xyz, ids=cur_pids)
-            found_poses_fname = os.path.splitext(p_fname)[0] + '_found.sdf'
-            search_db(dbdir, p_fname, found_poses_fname, pharmit_path=pharmit_path, ncpu=ncpu)
-            if sdf_not_empty(found_poses_fname):
-                pd_search.loc[pd_search.shape[0]] = [iteration, cur_pids, found_poses_fname, None]
-                flag = True
-            else:
-                pd_search.loc[pd_search.shape[0]] = [iteration, cur_pids, None, None]
-        if flag:
-            break
-    return flag
-
-
-def select(iteration, pd_search):
-    N = 10
-    for rowid in np.where(pd_search['iteration'] == iteration):
-        in_fname = pd_search.loc[rowid, 'found_sdf'].values[0]
-        if in_fname is None:
-            continue
-        out_fname = os.path.splitext(in_fname)[0] + '_selected.sdf'
-        pd_search.loc[rowid, 'selected_sdf'] = out_fname
-        mols = [(mol.GetNumHeavyAtoms(), mol) for mol in Chem.SDMolSupplier(in_fname)]
-        min_hac = min(i for i, j in mols)
-        w = Chem.SDWriter(out_fname)
-        for i, (hac, mol) in enumerate(sorted(mols, key=operator.itemgetter(0))):
-            if i < N or mol.GetNumHeavyAtoms() <= min_hac:
-                w.write(mol)
-        w.close()
+def get_grow_atom_ids(mol, pharm_xyz, tol=2):
+    ids = set()
+    for c in mol.GetConformers():
+        ids.update(get_grow_points2(c.GetPositions(), pharm_xyz, tol))
+    return list(sorted(ids))
 
 
 def remove_confs_rms(mol, rms=0.5):
 
     remove_ids = []
-    cids = [c.getId() for c in mol.GetConformers()]
+    cids = [c.GetId() for c in mol.GetConformers()]
 
     rms_list = [(i1, i2, norm(mol.GetConformer(i1).GetPositions() - mol.GetConformer(i2).GetPositions()))
                 for i1, i2 in combinations(cids, 2)]
@@ -433,54 +221,9 @@ def remove_confs_rms(mol, rms=0.5):
                 rms_list = [i for i in rms_list if i[0] != item[1] and i[1] != item[1]]
                 break
 
-    if remove_ids:
-        for cid in set(remove_ids):
-            mol.RemoveConformer(cid)
-        # conformers are reindexed staring with 0 step 1
-        for i, conf in enumerate(mol.GetConformers()):
-            conf.SetId(i)
+    for cid in set(remove_ids):
+        mol.RemoveConformer(cid)
 
-    return mol
-
-
-def get_confs(mol, template_mol, pharm_coords, dist, nconf, seed, **kwargs):
-    """
-
-    :param mol: RDKit Mol
-    :param template_mol: template RDKit MOl
-    :param pharm_coords: pandas df with first column feature labels and three columns of coordinates
-    :param dist: maximum allowed distance to pharmacophore feature, conformers where all distances to features greater
-                 than this value will be discarded
-    :param nconf: number of conformers
-    :return: mol with suitable conformers or None if no conformer matches
-    """
-
-    dists = []
-    labels = pharm_coords['label'].unique().tolist()
-    mol = __gen_confs(mol, template_mol, nconf=nconf, seed=seed, **kwargs)
-    mol = remove_confs_rms(mol, rms=dist)
-    if mol:
-        plist = load_multi_conf_mol(mol)
-        for conf_id, p in enumerate(plist):
-            conf_coords = p.get_feature_coords()
-            conf_coords = pd.DataFrame([(label, *xyz) for label, xyz in conf_coords], columns=['label', 'x', 'y', 'z'])
-            res = []
-            for lb in labels:
-                if lb in conf_coords.label.values:
-                    res.append(np.min(cdist(conf_coords.loc[conf_coords.label == lb, ['x', 'y', 'z']],
-                                            pharm_coords.loc[pharm_coords.label == lb, ['x', 'y', 'z']]),
-                                      axis=0)[0])
-            dists.append(res)
-        dists = np.array(dists)
-        # remove conformers which can not fit
-        remove_cids = np.where((dists > dist).all(axis=1))[0]
-        if remove_cids.size:
-            if remove_cids.shape[0] == mol.GetNumConformers():
-                mol = None
-            else:
-                print(dists)
-                remove_cids = list(map(int, remove_cids))
-                mol = remove_conf(mol, remove_cids)
     return mol
 
 
@@ -490,56 +233,6 @@ def remove_conf(mol, cids):
     for i, conf in enumerate(mol.GetConformers()):
         conf.SetId(i)
     return mol
-
-
-def screen_mols_simple(mols, fname, template_mol, pool, nconf, seed):
-    with open(fname, 'a') as f:
-        w = Chem.SDWriter(f)
-        if pool:
-            for mol in pool.imap_unordered(partial(__gen_confs, template_mol=template_mol, nconf=nconf, seed=seed), mols):
-                if mol:
-                    for c in mol.GetConformers():
-                        w.write(mol, c.GetId())
-        else:
-            for mol in mols:
-                mol = __gen_confs(mol, template_mol=template_mol, nconf=nconf, seed=seed)
-                if mol:
-                    for c in mol.GetConformers():
-                        w.write(mol, c.GetId())
-        w.close()
-
-
-def screen_simple(db, pharmacophore, pids, new_pids, iteration, output_dir, dist, pd_search):
-    # screen db against pharmacophore and if no matches screen its subpharmacopohres till the minimum size
-    flag = False
-    for i in reversed(range(1, len(new_pids) + 1)):
-        for j, new_pids_subset in enumerate(combinations(new_pids, i)):
-            cur_pids = tuple(sorted(set(pids + new_pids_subset)))
-            p_fname = os.path.join(output_dir, f'iter{iteration}-p{len(cur_pids)}-model{j}.json')
-            pharmacophore.write_model(p_fname, ids=cur_pids)
-            found_poses_fname = os.path.splitext(p_fname)[0] + '_found.sdf'
-            with open(found_poses_fname, 'a') as f:
-                w = Chem.SDWriter(f)
-                for mol_name in db.get_mol_names():
-                    # determine conf_id of a conformer which has all distances below threshold and
-                    # minimum sum of these distances
-                    dists = db.get_dists(mol_name)[list(new_pids_subset)]
-                    cids = np.where((dists <= dist).all(axis=1))[0]
-                    if cids.size:
-                        sum_dists = np.sum(dists, axis=1)
-                        cid = cids[np.argmin(sum_dists[cids])]
-                        mol = db.get_mol(mol_name)
-                        w.write(mol, int(cid))
-                w.close()
-            if sdf_not_empty(found_poses_fname):
-                pd_search.loc[pd_search.shape[0]] = [iteration, cur_pids, found_poses_fname, None]
-                flag = True
-            else:
-                pd_search.loc[pd_search.shape[0]] = [iteration, cur_pids, None, None]
-        if flag:
-            break
-    return flag
-
 
 
 def keep_confs(mol, ids):
@@ -554,7 +247,7 @@ def keep_confs(mol, ids):
     return mol
 
 
-def screen_pmapper(query_pharm, db_fname, output_sdf):
+def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd=0.2):
 
     matches = False
 
@@ -584,7 +277,7 @@ def screen_pmapper(query_pharm, db_fname, output_sdf):
                 if a < min_rmsd:
                     min_rmsd = a
                     min_ids = ids1
-            if min_rmsd <= 0.2:
+            if min_rmsd <= rmsd:
                 rmsd_dict[i] = AllChem.GetAlignmentTransform(Chem.Mol(m1), query_mol, atomMap=tuple(zip(min_ids, range(query_nfeatures))))
 
         if rmsd_dict:
@@ -642,14 +335,13 @@ def check_substr_mols(small, large):
         return False
 
 
-def select_mols(input_pkl):
-
-    mols = [(mol, mol_name, mol.GetNumHeavyAtoms()) for mol, mol_name in read_input(input_pkl)]
-    mols = sorted(mols, key=itemgetter(2))
-    hacs = np.array([item[2] for item in mols])
+def select_mols(mols):
+    mols = [(mol, mol.GetNumHeavyAtoms()) for mol in mols]
+    mols = sorted(mols, key=itemgetter(1))
+    hacs = np.array([item[1] for item in mols])
     deleted = np.zeros(hacs.shape)
 
-    for i, (mol, mol_name, hac) in enumerate(mols):
+    for i, (mol, hac) in enumerate(mols):
         for j in np.where(np.logical_and(hacs <= hac, deleted == 0))[0]:
             if i != j and check_substr_mols(mols[j][0], mol):
                 deleted[i] = 1
@@ -667,6 +359,161 @@ def save_mols(mols, sdf_fname):
                     w.write(mol, c.GetId())
     finally:
         w.close()
+
+
+def create_db(db_fname):
+    with sqlite3.connect(db_fname) as conn:
+        cur = conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS res")
+        cur.execute("CREATE TABLE res("
+                    "mol_id INTEGER NOT NULL, "
+                    "conf_id INTEGER NOT NULL, "
+                    "mol_block TEXT NOT NULL, "
+                    "matched_ids TEXT NOT NULL, "
+                    "visited_ids TEXT NOT NULL, "
+                    "matched_ids_count INTEGER NOT NULL, "
+                    "visited_ids_count INTEGER NOT NULL, "
+                    "parent_mol_id INTEGER, "
+                    "parent_conf_id INTEGER, "
+                    "used INTEGER NOT NULL)")
+        conn.commit()
+
+
+def save_res(mols, db_fname, parent_mol_id=None, parent_conf_id=None):
+    with sqlite3.connect(db_fname) as conn:
+        cur = conn.cursor()
+        cur.execute('SELECT MAX(mol_id) FROM res')
+        mol_id = cur.fetchone()[0]
+        if mol_id is None:
+            mol_id = 0
+        for mol in mols:
+            mol_id += 1
+            visited_ids = mol.GetProp('visited_ids')
+            visited_ids_count = visited_ids.count(',') + 1
+            for conf_id, conf in enumerate(mol.GetConformers()):
+                mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
+                matched_ids = conf.GetProp('matched_ids')
+                matched_ids_count = matched_ids.count(',') + 1
+                sql = 'INSERT INTO res VALUES (?,?,?,?,?,?,?,?,?,?)'
+                cur.execute(sql, (mol_id, conf_id, mol_block, matched_ids, visited_ids, matched_ids_count,
+                                  visited_ids_count, parent_mol_id, parent_conf_id, 0))
+        conn.commit()
+
+
+def choose_mol_to_grow(db_fname, max_features):
+    with sqlite3.connect(db_fname) as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT mol_id, conf_id, mol_block, matched_ids, visited_ids 
+                       FROM res 
+                       WHERE mol_id = (
+                         SELECT mol_id
+                         FROM res
+                         WHERE visited_ids_count < %s AND used = 0
+                         ORDER BY
+                           visited_ids_count - matched_ids_count,
+                           matched_ids_count DESC
+                         LIMIT 1
+                       )""" % max_features)
+        res = cur.fetchall()
+        if not res:
+            return None
+        mol = Chem.MolFromMolBlock(res[0][2])
+        mol.SetProp('_Name', str(res[0][0]))
+        mol.SetProp('visited_ids', res[0][4])
+        mol.GetConformer().SetId(res[0][1])
+        mol.GetConformer().SetProp('matched_ids', res[0][3])
+        for mol_id, conf_id, mol_block, matched_ids, visited_ids in res[1:]:
+            m = Chem.MolFromMolBlock(mol_block)
+            m.GetConformer().SetId(conf_id)
+            m.GetConformer().SetProp('matched_ids', matched_ids)
+            mol.AddConformer(m.GetConformer(), assignId=False)
+
+        cur.execute('UPDATE res SET used = 1 WHERE mol_id = %i' % res[0][0])
+        conn.commit()
+
+        return mol
+
+
+def remove_confs_exclvol(mol, exclvol_xyz, threshold=2):
+    if exclvol_xyz:
+        cids = []
+        for c in mol.GetConformers():
+            d = cdist(c.GetPositions(), exclvol_xyz)
+            if (d < threshold).any():
+                cids.append(c.GetId())
+        if len(cids) == mol.GetNumConformers():
+            return None
+        for i in cids:
+            mol.RemoveConformer(i)
+    return mol
+
+
+def get_pharm_xyz(pharm, ids=None):
+    ids = pharm._get_ids(ids)
+    coords = pharm.get_feature_coords(ids)
+    df = pd.DataFrame([(i, label, *c) for i, (label, c) in zip(ids, coords)], columns=['id', 'label', 'x', 'y', 'z'])
+    return df
+
+
+def remove_confs_match(mol, pharm, matched_ids, new_ids, dist):
+
+    remove_cids = []
+    cids = [c.GetId() for c in mol.GetConformers()]
+    plist = load_multi_conf_mol(mol)
+    matched_xyz = get_pharm_xyz(pharm, matched_ids)
+    new_xyz = get_pharm_xyz(pharm, new_ids)
+
+    for cid, p in zip(cids, plist):
+
+        conf_xyz = get_pharm_xyz(p)
+
+        # match new pharmacophore features
+        mask = np.array([i != j for i, j in product(conf_xyz['label'], new_xyz['label'])]).\
+            reshape(conf_xyz.shape[0], new_xyz.shape[0])
+        d = cdist(conf_xyz[['x', 'y', 'z']], new_xyz[['x', 'y', 'z']])
+        d[mask] = dist + 1
+        d = np.min(d <= dist, axis=0)
+        new_matched_ids = new_xyz[d]['id'].tolist()
+        if not new_matched_ids:
+            remove_cids.append(cid)
+            continue
+        else:
+            mol.GetConformer(cid).SetProp('matched_ids', ','.join(map(str, matched_ids + new_matched_ids)))
+            mol.GetConformer(cid).SetIntProp('matched_ids_count', len(matched_ids) + len(new_matched_ids))
+
+        # match previously matched pharmacophore features
+        mask = np.array([i != j for i, j in product(conf_xyz['label'], matched_xyz['label'])]).\
+            reshape(conf_xyz.shape[0], matched_xyz.shape[0])
+        d = cdist(conf_xyz[['x', 'y', 'z']], matched_xyz[['x', 'y', 'z']])
+        d[mask] = dist + 1
+        if not np.min(d <= dist, axis=0).all():
+            remove_cids.append(cid)
+            continue
+
+    if len(remove_cids) == mol.GetNumConformers():
+        return None
+    else:
+        for cid in remove_cids:
+            mol.RemoveConformer(cid)
+        return mol
+
+
+def get_confs(mol, template_mol, template_conf_id, nconfs, pharm, new_pids, dist, seed):
+    mol = __gen_confs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf=nconfs, seed=seed, coreConfId=template_conf_id)
+    if not mol:
+        return None
+    mol = remove_confs_rms(mol, rms=dist)
+    mol = remove_confs_exclvol(mol, pharm.exclvol)
+    if not mol:
+        return None
+    mol = remove_confs_match(mol,
+                             pharm=pharm,
+                             matched_ids=tuple(map(int, template_mol.GetConformer(template_conf_id).GetProp('matched_ids').split(','))),
+                             new_ids=new_pids,
+                             dist=dist)
+    if mol:
+        mol.SetProp('visited_ids', template_mol.GetProp('visited_ids') + ',' + ','.join(map(str, new_pids)))
+    return mol
 
 
 def main():
@@ -707,15 +554,12 @@ def main():
     if not os.path.isdir(args.output):
         os.makedirs(args.output, exist_ok=True)
 
-    # if args.ncpu > 1:
     pool = Pool(args.ncpu)
-    # else:
-    #     pool = None
 
     args.ids = tuple(sorted(set(args.ids)))
 
-    # tree_search = defaultdict(dict)  # {iteration_number: {pids: sdf_fname, pids: sdf_fname, ...}, ...}
-    pd_search = pd.DataFrame(columns=['iteration', 'feature_ids', 'found_sdf', 'selected_sdf'])
+    res_db_fname = os.path.join(args.output, 'res.db')
+    create_db(res_db_fname)
 
     p = PharmModel2()
     p.load_from_xyz(args.query)
@@ -723,112 +567,98 @@ def main():
 
     print(p.clusters)
 
-    iteration = 0
-
-    conf_fname = os.path.join(args.output, f'iter{iteration}.sdf')
+    conf_fname = os.path.join(args.output, f'iter0.sdf')
     conf_fname_pkl = os.path.splitext(conf_fname)[0] + '.pkl'
 
     new_pids = tuple(args.ids)
-    pd_search.loc[0] = [-1, tuple(), None, None]
 
     flag = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments, output_sdf=conf_fname)
-    if flag:
-        pd_search.loc[pd_search.shape[0]] = [iteration, new_pids, conf_fname, None]
-    else:
+    if not flag:
         exit('No matches between starting fragments and the chosen subpharmacophore.')
 
-    mols = select_mols(conf_fname_pkl)
-    conf_selected_fname = os.path.splitext(conf_fname)[0] + '_selected.sdf'
-    save_mols(mols, conf_selected_fname)
-    pd_search.loc[pd_search['iteration'] == iteration, 'selected_sdf'] = conf_selected_fname
+    mols = select_mols([mol for mol, mol_name in read_input(conf_fname_pkl)])
+    mols = [remove_confs_exclvol(mol, p.exclvol) for mol in mols]
+    mols = [m for m in mols if m]
+    ids = ','.join(map(str, new_pids))
+    for mol in mols:
+        mol.SetProp('visited_ids', ids)
+        for conf in mol.GetConformers():
+            conf.SetProp('matched_ids', ids)
+    save_res(mols, res_db_fname)
 
-    iteration = 1
+    mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
 
-    stereo_opts = StereoEnumerationOptions(tryEmbedding=True, maxIsomers=32)
+    while mol:
 
-    while True:
+        print(mol.GetProp('_Name'))
+        start = time.perf_counter()
 
-        # new_pids will be the same for different lines from the same iteration because only a cluster with
-        # non intersected feature ids can be selected
-        new_pids = p.select_nearest_cluster(pd_search.loc[pd_search['iteration'] == iteration - 1].iloc[0]['feature_ids'])
+        new_pids = p.select_nearest_cluster(tuple(map(int, mol.GetProp('visited_ids').split(','))))
+        atom_ids = get_grow_atom_ids(mol, p.get_xyz(new_pids))
+        new_mols = list(grow_mol(mol, args.db, radius=2, min_atoms=1, max_atoms=12,
+                                 max_replacements=None, replace_ids=atom_ids, return_mol=True,
+                                 ncores=args.ncpu))
 
-        # if no new features then exit
-        if not new_pids:
-            break
+        print(f'mol grow: {len(new_mols)} mols, {time.perf_counter() - start}')
+        start2 = time.perf_counter()
 
-        new_xyz = p.get_xyz(new_pids)
-        new_pharm_coords = p.get_feature_coords_pd(new_pids)
+        new_isomers = []
+        for isomers in pool.imap_unordered(gen_stereo, (m[1] for m in new_mols)):
+            new_isomers.extend(isomers)
 
-        print(new_pids)
-        print(new_pharm_coords)
+        print(f'stereo enumeration: {len(new_isomers)} isomers, {time.perf_counter() - start2}')
+        start2 = time.perf_counter()
 
-        # all generated compounds are stored in a single file, however their parent compounds could match different
-        # subsets of features. This was done due to fast screening, so we will not lose much time, but greatly
-        # simplify manipulation with data
-        conf_fname = os.path.join(args.output, f'iter{iteration}.sdf')
+        new_mols = defaultdict(list)
+        for conf in mol.GetConformers():
+            conf_id = conf.GetId()
+            for new_mol in pool.imap_unordered(partial(get_confs,
+                                                       template_mol=mol,
+                                                       template_conf_id=conf_id,
+                                                       nconfs=args.nconf,
+                                                       pharm=p,
+                                                       new_pids=new_pids,
+                                                       dist=args.dist,
+                                                       seed=args.seed),
+                                               new_isomers):
+                if new_mol:
+                    new_mols[conf_id].append(new_mol)
 
-        for i, rowid in enumerate(np.where(pd_search['iteration'] == iteration - 1)):
+        print(f'conf generation: {sum(len(v) for v in new_mols.values())} confs, {time.perf_counter() - start2}')
+        start2 = time.perf_counter()
 
-            fname = pd_search.iloc[rowid]['selected_sdf'].values[0]
-            if fname is None:
-                continue
+        max_count = 0
+        for v in new_mols.values():
+            for m in v:
+                for c in m:
+                    if c.GetIntProp('matched_ids_count') > max_count:
+                        max_count = c.GetIntProp('matched_ids_count')
 
-            for j, (parent_mol, parent_mol_name) in enumerate(read_input(os.path.splitext(fname)[0] + '.pkl')):
-                for conf in parent_mol.GetConformers():
-                    replace_ids = get_grow_points2(conf.GetPositions(), new_xyz)
-                    new_mols = list(grow_mol(parent_mol, args.db, radius=2, min_atoms=1, max_atoms=12,
-                                             max_replacements=None, replace_ids=replace_ids, return_mol=True,
-                                             ncores=args.ncpu))
-                    new_isomers = []
-                    for isomers in pool.imap_unordered(gen_stereo, (m[1] for m in new_mols)):
-                        new_isomers.extend(isomers)
-                    for k, new_mol in enumerate(new_isomers):
-                        new_mol.SetProp('_Name', f'mol-{iteration}-{str(j).zfill(5)}-{str(k).zfill(6)}')
+        for v in new_mols.values():
+            for i in reversed(range(len(v))):
+                cids = []
+                for c in v[i].GetConformers():
+                    if c.GetIntProp('matched_ids_count') < max_count:
+                        cids.append(c.GetId())
+                if len(cids) == v[i].GetNumConformers():
+                    del v[i]
+                else:
+                    for cid in cids:
+                        v[i].RemoveConformer(cid)
 
-                    # add parent compounds with the same conformation, because it may accidentally match
-                    # a larger subset of features. But since we do not change its conformation this would be
-                    # unlikely
-                    new_mols = new_isomers + [parent_mol]
+        for conf_id in new_mols:
+            new_mols[conf_id] = select_mols(new_mols[conf_id])
 
-                    # add to file molecule and distances to new pharmacophore features
-                    with open(conf_fname, 'at') as f:
-                        w = Chem.SDWriter(f)
-                        if pool:
-                            generator = pool.imap_unordered(partial(get_confs,
-                                                                    template_mol=parent_mol,
-                                                                    nconf=args.nconf,
-                                                                    seed=args.seed,
-                                                                    dist=args.dist,
-                                                                    pharm_coords=new_pharm_coords,
-                                                                    coreConfId=conf.GetId()), new_mols)
-                        else:
-                            generator = (get_confs(mol, parent_mol, pharm_coords=new_pharm_coords,
-                                                   nconf=args.nconf, dist=args.dist, seed=args.seed,
-                                                   coreConfId=conf.GetId())
-                                         for mol in new_mols)
-                        for mol in generator:
-                            if mol:
-                                for i in range(mol.GetNumConformers()):
-                                    w.write(mol, i)
-                        w.close()
+        print(f'conf filtering and selection: {sum(len(v) for v in new_mols.values())} confs, {time.perf_counter() - start2}')
 
-        print(f'{conf_fname} was created')
+        parent_mol_id = mol.GetProp('_Name')
+        for conf_id, mols in new_mols.items():
+            save_res(mol, res_db_fname, parent_mol_id=parent_mol_id, parent_conf_id=conf_id)
 
-        db_dname = os.path.join(args.output, f'iter{iteration}_db')
-        create_db(conf_fname, db_dname, pharmit_path=args.pharmit, pharmit_spec=args.pharmit_spec, ncpu=args.ncpu)
+        mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
 
-        flags = []
-        for rowid in np.where(pd_search['iteration'] == iteration - 1):
-            print(pd_search.iloc[rowid]['feature_ids'].values[0], new_pids)
-            flag = screen(dbdir=db_dname, pharmacophore=p, pids=pd_search.iloc[rowid]['feature_ids'].values[0],
-                          new_pids=new_pids, iteration=iteration, output_dir=args.output, ncpu=args.ncpu,
-                          pd_search=pd_search, pharmit_path=args.pharmit)
-            select(iteration, pd_search)
-            flags.append(flag)
-        if any(flags):
-            iteration += 1
-        else:
-            break
+        print('selected mols:', sum(len(v) for v in new_mols.values()))
+        print(f'overall time {time.perf_counter() - start}')
 
 
 if __name__ == '__main__':
