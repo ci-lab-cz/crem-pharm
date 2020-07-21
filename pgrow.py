@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import sys
 import pickle
 import operator
 from sklearn.cluster import AgglomerativeClustering
@@ -499,20 +500,44 @@ def remove_confs_match(mol, pharm, matched_ids, new_ids, dist):
 
 
 def get_confs(mol, template_mol, template_conf_id, nconfs, pharm, new_pids, dist, seed):
-    mol = __gen_confs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf=nconfs, seed=seed, coreConfId=template_conf_id)
+
+    # start = time.process_time()
+    try:
+        mol = __gen_confs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf=nconfs, seed=seed, coreConfId=template_conf_id)
+    except Exception as e:
+        sys.stderr.write(f'the following error was occurred for in __gen_confs ' + str(e) + '\n')
+        return None
+
     if not mol:
         return None
+
+    # print(f'__gen_conf: {mol.GetNumConformers()} confs, {time.process_time() - start}')
+    # start = time.process_time()
+
     mol = remove_confs_rms(mol, rms=dist)
+
+    # print(f'remove_confs_rms: {mol.GetNumConformers()} confs, {time.process_time() - start}')
+    # start = time.process_time()
+
     mol = remove_confs_exclvol(mol, pharm.exclvol)
     if not mol:
         return None
+
+    # print(f'remove_confs_exclvol: {mol.GetNumConformers()} confs, {time.process_time() - start}')
+    # start = time.process_time()
+
     mol = remove_confs_match(mol,
                              pharm=pharm,
                              matched_ids=tuple(map(int, template_mol.GetConformer(template_conf_id).GetProp('matched_ids').split(','))),
                              new_ids=new_pids,
                              dist=dist)
-    if mol:
-        mol.SetProp('visited_ids', template_mol.GetProp('visited_ids') + ',' + ','.join(map(str, new_pids)))
+
+    # print(f'remove_confs_match: {mol.GetNumConformers() if mol else None} confs, {time.process_time() - start}')
+
+    if not mol:
+        return None
+
+    mol.SetProp('visited_ids', template_mol.GetProp('visited_ids') + ',' + ','.join(map(str, new_pids)))
     return mol
 
 
@@ -590,14 +615,14 @@ def main():
 
     while mol:
 
-        print(mol.GetProp('_Name'))
+        print(f"===== {mol.GetProp('_Name')} =====")
         start = time.perf_counter()
 
         new_pids = p.select_nearest_cluster(tuple(map(int, mol.GetProp('visited_ids').split(','))))
         atom_ids = get_grow_atom_ids(mol, p.get_xyz(new_pids))
         new_mols = list(grow_mol(mol, args.db, radius=2, min_atoms=1, max_atoms=12,
                                  max_replacements=None, replace_ids=atom_ids, return_mol=True,
-                                 ncores=args.ncpu))
+                                 ncores=1))
 
         print(f'mol grow: {len(new_mols)} mols, {time.perf_counter() - start}')
         start2 = time.perf_counter()
