@@ -473,7 +473,7 @@ def remove_confs_match(mol, pharm, matched_ids, new_ids, dist):
             reshape(conf_xyz.shape[0], new_xyz.shape[0])
         d = cdist(conf_xyz[['x', 'y', 'z']], new_xyz[['x', 'y', 'z']])
         d[mask] = dist + 1
-        d = np.min(d <= dist, axis=0)
+        d = np.min(d, axis=0) <= dist
         new_matched_ids = new_xyz[d]['id'].tolist()
         if not new_matched_ids:
             remove_cids.append(cid)
@@ -487,7 +487,7 @@ def remove_confs_match(mol, pharm, matched_ids, new_ids, dist):
             reshape(conf_xyz.shape[0], matched_xyz.shape[0])
         d = cdist(conf_xyz[['x', 'y', 'z']], matched_xyz[['x', 'y', 'z']])
         d[mask] = dist + 1
-        if not np.min(d <= dist, axis=0).all():
+        if not (np.min(d, axis=0) <= dist).all():
             remove_cids.append(cid)
             continue
 
@@ -528,7 +528,7 @@ def get_confs(mol, template_mol, template_conf_id, nconfs, pharm, new_pids, dist
 
     mol = remove_confs_match(mol,
                              pharm=pharm,
-                             matched_ids=tuple(map(int, template_mol.GetConformer(template_conf_id).GetProp('matched_ids').split(','))),
+                             matched_ids=list(map(int, template_mol.GetConformer(template_conf_id).GetProp('matched_ids').split(','))),
                              new_ids=new_pids,
                              dist=dist)
 
@@ -652,10 +652,11 @@ def main():
         print(f'conf generation: {sum(len(v) for v in new_mols.values())} confs, {time.perf_counter() - start2}')
         start2 = time.perf_counter()
 
+        # keep only conformers with maximum number of matched features
         max_count = 0
         for v in new_mols.values():
             for m in v:
-                for c in m:
+                for c in m.GetConformers():
                     if c.GetIntProp('matched_ids_count') > max_count:
                         max_count = c.GetIntProp('matched_ids_count')
 
