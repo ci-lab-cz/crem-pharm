@@ -337,7 +337,7 @@ def check_substr_mols(small, large):
 
 
 def select_mols(mols):
-    mols = [(mol, mol.GetNumHeavyAtoms()) for mol in mols]
+    mols = [(Chem.RemoveHs(mol), mol.GetNumHeavyAtoms()) for mol in mols]
     mols = sorted(mols, key=itemgetter(1))
     hacs = np.array([item[1] for item in mols])
     deleted = np.zeros(hacs.shape)
@@ -389,6 +389,7 @@ def save_res(mols, db_fname, parent_mol_id=None, parent_conf_id=None):
             mol_id = 0
         for mol in mols:
             mol_id += 1
+            mol.SetProp('_Name', str(mol_id))
             visited_ids = mol.GetProp('visited_ids')
             visited_ids_count = visited_ids.count(',') + 1
             for conf_id, conf in enumerate(mol.GetConformers()):
@@ -620,18 +621,18 @@ def main():
 
         new_pids = p.select_nearest_cluster(tuple(map(int, mol.GetProp('visited_ids').split(','))))
         atom_ids = get_grow_atom_ids(mol, p.get_xyz(new_pids))
-        new_mols = list(grow_mol(mol, args.db, radius=2, min_atoms=1, max_atoms=12,
+        new_mols = list(grow_mol(mol, args.db, radius=3, min_atoms=1, max_atoms=12,
                                  max_replacements=None, replace_ids=atom_ids, return_mol=True,
-                                 ncores=1))
+                                 ncores=args.ncpu))
 
-        print(f'mol grow: {len(new_mols)} mols, {time.perf_counter() - start}')
+        print(f'mol grow: {len(new_mols)} mols, {round(time.perf_counter() - start, 4)}')
         start2 = time.perf_counter()
 
         new_isomers = []
         for isomers in pool.imap_unordered(gen_stereo, (m[1] for m in new_mols)):
             new_isomers.extend(isomers)
 
-        print(f'stereo enumeration: {len(new_isomers)} isomers, {time.perf_counter() - start2}')
+        print(f'stereo enumeration: {len(new_isomers)} isomers, {round(time.perf_counter() - start2, 4)}')
         start2 = time.perf_counter()
 
         new_mols = defaultdict(list)
@@ -649,7 +650,7 @@ def main():
                 if new_mol:
                     new_mols[conf_id].append(new_mol)
 
-        print(f'conf generation: {sum(len(v) for v in new_mols.values())} confs, {time.perf_counter() - start2}')
+        print(f'conf generation: {sum(len(v) for v in new_mols.values())} molecules, {round(time.perf_counter() - start2, 4)}')
         start2 = time.perf_counter()
 
         # keep only conformers with maximum number of matched features
@@ -675,16 +676,18 @@ def main():
         for conf_id in new_mols:
             new_mols[conf_id] = select_mols(new_mols[conf_id])
 
-        print(f'conf filtering and selection: {sum(len(v) for v in new_mols.values())} confs, {time.perf_counter() - start2}')
+        print(f'conf filtering and selection: {sum(len(v) for v in new_mols.values())} compounds, {round(time.perf_counter() - start2, 4)}')
 
         parent_mol_id = mol.GetProp('_Name')
         for conf_id, mols in new_mols.items():
-            save_res(mol, res_db_fname, parent_mol_id=parent_mol_id, parent_conf_id=conf_id)
+            save_res(mols, res_db_fname, parent_mol_id=parent_mol_id, parent_conf_id=conf_id)
 
         mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
 
         print('selected mols:', sum(len(v) for v in new_mols.values()))
-        print(f'overall time {time.perf_counter() - start}')
+        print(f'overall time {round(time.perf_counter() - start, 4)}')
+
+        sys.stdout.flush()
 
 
 if __name__ == '__main__':
