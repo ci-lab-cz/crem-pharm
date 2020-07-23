@@ -211,9 +211,10 @@ def get_grow_atom_ids(mol, pharm_xyz, tol=2):
 def remove_confs_rms(mol, rms=0.5):
 
     remove_ids = []
-    cids = [c.GetId() for c in mol.GetConformers()]
+    mol_tmp = Chem.RemoveHs(mol)   # calc rms for heavy atoms only
+    cids = [c.GetId() for c in mol_tmp.GetConformers()]
 
-    rms_list = [(i1, i2, norm(mol.GetConformer(i1).GetPositions() - mol.GetConformer(i2).GetPositions()))
+    rms_list = [(i1, i2, norm(mol_tmp.GetConformer(i1).GetPositions() - mol_tmp.GetConformer(i2).GetPositions()))
                 for i1, i2 in combinations(cids, 2)]
     while any(item[2] < rms for item in rms_list):
         for item in rms_list:
