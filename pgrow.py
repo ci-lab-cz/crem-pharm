@@ -229,11 +229,15 @@ def remove_confs_rms(mol, rms=0.5):
     return mol
 
 
+def reassing_conf_ids(mol):
+    for i, conf in enumerate(mol.GetConformers()):
+        conf.SetId(i)
+
+
 def remove_conf(mol, cids):
     for cid in set(cids):
         mol.RemoveConformer(cid)
-    for i, conf in enumerate(mol.GetConformers()):
-        conf.SetId(i)
+    reassing_conf_ids(mol)
     return mol
 
 
@@ -243,9 +247,7 @@ def keep_confs(mol, ids):
     remove_ids = all_ids - set(ids)
     for cid in set(remove_ids):
         mol.RemoveConformer(cid)
-    # conformers are reindexed staring with 0 step 1
-    for i, conf in enumerate(mol.GetConformers()):
-        conf.SetId(i)
+    reassing_conf_ids(mol)
     return mol
 
 
