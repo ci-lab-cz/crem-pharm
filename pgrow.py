@@ -185,16 +185,6 @@ def __gen_confs(mol, template_mol=None, nconf=10, seed=42, **kwargs):
     return mol
 
 
-def sdf_not_empty(fname):
-    try:
-        for m in Chem.SDMolSupplier(fname):
-            if m:
-                return True
-        return False
-    except OSError:
-        return False
-
-
 def get_grow_points2(mol_xyz, pharm_xyz, tol=2):
     dist = np.min(cdist(mol_xyz, pharm_xyz), axis=1)
     ids = np.flatnonzero(dist <= (np.min(dist) + tol))
@@ -379,6 +369,7 @@ def create_db(db_fname):
                     "visited_ids_count INTEGER NOT NULL, "
                     "parent_mol_id INTEGER, "
                     "parent_conf_id INTEGER, "
+                    "nmols INTEGER NOT NULL, "
                     "used INTEGER NOT NULL)")
         conn.commit()
 
@@ -399,29 +390,66 @@ def save_res(mols, db_fname, parent_mol_id=None, parent_conf_id=None):
                 mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
                 matched_ids = conf.GetProp('matched_ids')
                 matched_ids_count = matched_ids.count(',') + 1
-                sql = 'INSERT INTO res VALUES (?,?,?,?,?,?,?,?,?,?)'
+                sql = 'INSERT INTO res VALUES (?,?,?,?,?,?,?,?,?,?,?)'
                 cur.execute(sql, (mol_id, conf_id, mol_block, matched_ids, visited_ids, matched_ids_count,
-                                  visited_ids_count, parent_mol_id, parent_conf_id, 0))
+                                  visited_ids_count, parent_mol_id, parent_conf_id, 0, 0))
         conn.commit()
 
 
-def choose_mol_to_grow(db_fname, max_features):
+def update_db(db_fname, mol_id, nmols):
+    with sqlite3.connect(db_fname) as conn:
+        while mol_id is not None:
+            cur = conn.cursor()
+            cur.execute('SELECT nmols FROM res WHERE mol_id = %i' % mol_id)
+            n = cur.fetchone()[0] + nmols
+            cur.execute('UPDATE res SET nmols = %i WHERE mol_id = %i' % (n, mol_id))
+            conn.commit()
+            cur.execute('SELECT parent_mol_id FROM res WHERE mol_id = %i' % mol_id)
+            mol_id = cur.fetchone()[0]
+
+
+def choose_mol_to_grow(db_fname, max_features, search_deep=True):
+
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
-        cur.execute("""SELECT mol_id, conf_id, mol_block, matched_ids, visited_ids 
-                       FROM res 
-                       WHERE mol_id = (
-                         SELECT mol_id
-                         FROM res
-                         WHERE visited_ids_count < %s AND used = 0
-                         ORDER BY
-                           visited_ids_count - matched_ids_count,
-                           matched_ids_count DESC
-                         LIMIT 1
-                       )""" % max_features)
+
+        if search_deep:
+            cur.execute("""SELECT mol_id, conf_id, mol_block, matched_ids, visited_ids 
+                           FROM res 
+                           WHERE mol_id = (
+                             SELECT mol_id
+                             FROM res
+                             WHERE visited_ids_count < %s AND used = 0
+                             ORDER BY
+                               visited_ids_count - matched_ids_count,
+                               matched_ids_count DESC,
+                               rowid DESC
+                             LIMIT 1
+                           )""" % max_features)
+        else:
+            cur.execute("""SELECT mol_id, conf_id, mol_block, matched_ids, visited_ids 
+                           FROM res 
+                           WHERE mol_id = (
+                             SELECT c.mol_id FROM (
+                               SELECT DISTINCT 
+                                 a.mol_id, 
+                                 a.matched_ids_count, 
+                                 a.visited_ids_count, 
+                                 ifnull(b.nmols, a.nmols) AS parent_nmols
+                               FROM (SELECT * FROM res WHERE visited_ids_count < %i AND used = 0) AS a
+                               LEFT JOIN res b ON b.mol_id = a.parent_mol_id
+                               ORDER BY
+                                 a.visited_ids_count,
+                                 a.visited_ids_count - a.matched_ids_count,
+                                 parent_nmols
+                               LIMIT 1
+                             ) AS c
+                           )""" % max_features)
+
         res = cur.fetchall()
         if not res:
             return None
+
         mol = Chem.MolFromMolBlock(res[0][2])
         mol.SetProp('_Name', str(res[0][0]))
         mol.SetProp('visited_ids', res[0][4])
@@ -681,11 +709,17 @@ def main():
 
         print(f'conf filtering and selection: {sum(len(v) for v in new_mols.values())} compounds, {round(time.perf_counter() - start2, 4)}')
 
-        parent_mol_id = mol.GetProp('_Name')
+        parent_mol_id = int(mol.GetProp('_Name'))
         for conf_id, mols in new_mols.items():
             save_res(mols, res_db_fname, parent_mol_id=parent_mol_id, parent_conf_id=conf_id)
 
-        mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
+        update_db(res_db_fname, parent_mol_id, len(new_isomers))
+
+        search_deep = True
+        if mol.GetProp('visited_ids').count(',') + 1 == p.get_num_features() or not new_mols:
+            search_deep = False
+        print('search deep: ', search_deep)
+        mol = choose_mol_to_grow(res_db_fname, p.get_num_features(), search_deep=search_deep)
 
         print('selected mols:', sum(len(v) for v in new_mols.values()))
         print(f'overall time {round(time.perf_counter() - start, 4)}')
