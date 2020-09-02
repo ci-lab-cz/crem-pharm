@@ -106,6 +106,8 @@ class PharmModel2(P):
             self.load_from_feature_coords(tuple(feature_coords))
         if self.exclvol:
             self.exclvol = np.array(self.exclvol)
+        else:
+            self.exclvol = None
 
 
 def gen_stereo(mol):
@@ -468,7 +470,7 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
 
 
 def remove_confs_exclvol(mol, exclvol_xyz, threshold=2):
-    if exclvol_xyz:
+    if exclvol_xyz is not None:
         cids = []
         for c in mol.GetConformers():
             d = cdist(c.GetPositions(), exclvol_xyz)
@@ -592,7 +594,7 @@ def main():
     parser.add_argument('-q', '--query', metavar='FILENAME', required=True,
                         help='pharmacophore model.')
     parser.add_argument('--ids', metavar='INTEGER', required=True, nargs='+', type=int,
-                        help='ids of pharmacophore features used for initial screening.')
+                        help='ids of pharmacophore features used for initial screening. 0-index based.')
     parser.add_argument('-o', '--output', metavar='DIRNAME', required=True,
                         help='path to directory where intermediate and final results will be stored.')
     parser.add_argument('-t', '--clustering_threshold', metavar='NUMERIC', required=False, type=float, default=3,
