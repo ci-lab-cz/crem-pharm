@@ -6,7 +6,7 @@ import sys
 import pickle
 import operator
 from sklearn.cluster import AgglomerativeClustering
-from collections import defaultdict
+from collections import defaultdict, Counter
 from multiprocessing import Pool
 from functools import partial
 from scipy.spatial.distance import cdist
@@ -573,6 +573,20 @@ def get_confs(mol, template_mol, template_conf_id, nconfs, pharm, new_pids, dist
     return mol
 
 
+def get_features(p, pids, add_features):
+    if add_features:
+        c = Counter(label for label, xyz in p.get_feature_coords(pids))
+        output = dict()
+        for k, v in c.items():
+            if k == 'a':
+                output['nAr'] = (v, 10)
+            else:
+                output[f'n{k}'] = (v, 10)
+        return output
+    else:
+        return dict()
+
+
 def main():
     parser = argparse.ArgumentParser(description='Grow structures to fit query pharmacophore.')
     parser.add_argument('-q', '--query', metavar='FILENAME', required=True,
@@ -590,6 +604,9 @@ def main():
                              'This can also be pharmit database with precomputed conformers.')
     parser.add_argument('-d', '--db', metavar='FILENAME', required=True,
                         help='database with interchangeable fragments.')
+    parser.add_argument('-e', '--additional_features', action='store_true', default=False,
+                        help='indicate if the fragment database contains pharmacophore features to be used for '
+                             'fragment selection.')
     parser.add_argument('-n', '--nconf', metavar='INTEGER', required=False, type=int, default=20,
                         help='number of conformers generated per structure. Default: 20.')
     parser.add_argument('-s', '--seed', metavar='INTEGER', required=False, type=int, default=-1,
@@ -652,9 +669,10 @@ def main():
 
         new_pids = p.select_nearest_cluster(tuple(map(int, mol.GetProp('visited_ids').split(','))))
         atom_ids = get_grow_atom_ids(mol, p.get_xyz(new_pids))
+        kwargs = get_features(p, new_pids, args.additional_features)
         new_mols = list(grow_mol(mol, args.db, radius=3, min_atoms=1, max_atoms=12,
                                  max_replacements=None, replace_ids=atom_ids, return_mol=True,
-                                 ncores=args.ncpu))
+                                 ncores=args.ncpu, **kwargs))
 
         print(f'mol grow: {len(new_mols)} mols, {round(time.perf_counter() - start, 4)}')
         start2 = time.perf_counter()
