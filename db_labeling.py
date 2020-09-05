@@ -72,6 +72,7 @@ def entry_point():
                 cur.execute(f"UPDATE frags SET {upd_str} WHERE core_id = {core_id}")
                 if args.verbose and i % 10000 == 0:
                     sys.stderr.write(f'\r{i} fragments processed')
+            conn.commit()
 
         else:
 
@@ -83,6 +84,7 @@ def entry_point():
                     cur.execute(f"UPDATE {table} SET {upd_str} WHERE rowid = '{rowid}'")
                     if args.verbose and i % 10000 == 0:
                         sys.stderr.write(f'\r{i} fragments processed')
+                conn.commit()
 
 
 if __name__ == '__main__':
