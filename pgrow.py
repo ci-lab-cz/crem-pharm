@@ -3,8 +3,9 @@
 import argparse
 import os
 import sys
+import shutil
+import json
 import pickle
-import operator
 from sklearn.cluster import AgglomerativeClustering
 from collections import defaultdict, Counter
 from multiprocessing import Pool
@@ -469,11 +470,13 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
         return mol
 
 
-def remove_confs_exclvol(mol, exclvol_xyz, threshold=2):
-    if exclvol_xyz is not None:
+def remove_confs_exclvol(mol, exclvol_xyz, threshold):
+    # if threshold < 0 (default -1) means ignore excl volumes
+    if threshold >= 0 and exclvol_xyz is not None:
         cids = []
+        ids = [atom.GetAtomicNum() > 1 for atom in mol.GetAtoms()]
         for c in mol.GetConformers():
-            d = cdist(c.GetPositions(), exclvol_xyz)
+            d = cdist(c.GetPositions()[ids], exclvol_xyz)
             if (d < threshold).any():
                 cids.append(c.GetId())
         if len(cids) == mol.GetNumConformers():
@@ -533,7 +536,7 @@ def remove_confs_match(mol, pharm, matched_ids, new_ids, dist):
         return mol
 
 
-def get_confs(mol, template_mol, template_conf_id, nconfs, pharm, new_pids, dist, seed):
+def get_confs(mol, template_mol, template_conf_id, nconfs, pharm, new_pids, dist, evol, seed):
 
     # start = time.process_time()
     try:
@@ -553,7 +556,7 @@ def get_confs(mol, template_mol, template_conf_id, nconfs, pharm, new_pids, dist
     # print(f'remove_confs_rms: {mol.GetNumConformers()} confs, {time.process_time() - start}')
     # start = time.process_time()
 
-    mol = remove_confs_exclvol(mol, pharm.exclvol)
+    mol = remove_confs_exclvol(mol, pharm.exclvol, evol)
     if not mol:
         return None
 
@@ -600,13 +603,10 @@ def main():
     parser.add_argument('-t', '--clustering_threshold', metavar='NUMERIC', required=False, type=float, default=3,
                         help='threshold to determine clusters. Default: 3.')
     parser.add_argument('-f', '--fragments', metavar='FILENAME', required=True,
-                        help='file with initial fragments. If extension is SMI - conformers will be generated. '
-                             'If SMI file contains fragment names they should be tab-separated. If extension is SDF - '
-                             'the file should contain conformers having identical names for the same compounds. '
-                             'This can also be pharmit database with precomputed conformers.')
+                        help='file with initial fragments - DB in pmapper format.')
     parser.add_argument('-d', '--db', metavar='FILENAME', required=True,
                         help='database with interchangeable fragments.')
-    parser.add_argument('-e', '--additional_features', action='store_true', default=False,
+    parser.add_argument('-x', '--additional_features', action='store_true', default=False,
                         help='indicate if the fragment database contains pharmacophore features to be used for '
                              'fragment selection.')
     parser.add_argument('-n', '--nconf', metavar='INTEGER', required=False, type=int, default=20,
@@ -615,11 +615,10 @@ def main():
                         help='seed for random number generator to get reproducible output. Default: -1.')
     parser.add_argument('--dist', metavar='NUMERIC', required=False, type=float, default=1,
                         help='maximum distance to discard conformers in fast filtering. Default: 1.')
-    parser.add_argument('-p', '--pharmit', metavar='pharmit executable', required=False, type=str,
-                        default='/home/pavel/pharmit/pharmit/src/build/pharmit',
-                        help='path to pharmit executable.')
-    parser.add_argument('-a', '--pharmit_spec', metavar='FILENAME', required=False, type=str, default=None,
-                        help='path to file with pharmacophore specifications in pharmit format.')
+    parser.add_argument('-e', '--exclusion_volume', metavar='NUMERIC', required=False, type=float, default=-1,
+                        help='radius of exclusion volumes (distance to heavy atoms). By default exclusion volumes are '
+                             'disabled even if they are present in a query pharmacophore. To enable them set '
+                             'a positive numeric value.')
     parser.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
                         help='number of cpu cores to use. Default: 1.')
 
@@ -629,6 +628,11 @@ def main():
 
     if not os.path.isdir(args.output):
         os.makedirs(args.output, exist_ok=True)
+
+    with open(os.path.join(args.output, 'setup.json'), 'wt') as f:
+        f.write(json.dumps(vars(args), indent=4))
+
+    shutil.copyfile(args.query, os.path.join(args.output, os.path.basename(args.query)))
 
     pool = Pool(args.ncpu)
 
@@ -653,7 +657,7 @@ def main():
         exit('No matches between starting fragments and the chosen subpharmacophore.')
 
     mols = select_mols([mol for mol, mol_name in read_input(conf_fname_pkl)])
-    mols = [remove_confs_exclvol(mol, p.exclvol) for mol in mols]
+    mols = [remove_confs_exclvol(mol, p.exclvol, args.exclusion_volume) for mol in mols]
     mols = [m for m in mols if m]
     ids = ','.join(map(str, new_pids))
     for mol in mols:
@@ -696,6 +700,7 @@ def main():
                                                        pharm=p,
                                                        new_pids=new_pids,
                                                        dist=args.dist,
+                                                       evol=args.exclusion_volume,
                                                        seed=args.seed),
                                                new_isomers):
                 if new_mol:
