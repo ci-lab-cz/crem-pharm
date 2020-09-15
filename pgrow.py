@@ -377,25 +377,36 @@ def create_db(db_fname):
         conn.commit()
 
 
-def save_res(mols, db_fname, parent_mol_id=None, parent_conf_id=None):
+def save_res(mols_dict, db_fname, parent_mol_id=None):
+    # mols - dict {parent_conf_id: [mol1, mol2, ...], ...}
+    smiles = dict()  # {smi: (mol_id, max_conf_id), ...}
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
         cur.execute('SELECT MAX(mol_id) FROM res')
-        mol_id = cur.fetchone()[0]
-        if mol_id is None:
-            mol_id = 0
-        for mol in mols:
-            mol_id += 1
-            mol.SetProp('_Name', str(mol_id))
-            visited_ids = mol.GetProp('visited_ids')
-            visited_ids_count = visited_ids.count(',') + 1
-            for conf_id, conf in enumerate(mol.GetConformers()):
-                mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
-                matched_ids = conf.GetProp('matched_ids')
-                matched_ids_count = matched_ids.count(',') + 1
-                sql = 'INSERT INTO res VALUES (?,?,?,?,?,?,?,?,?,?,?)'
-                cur.execute(sql, (mol_id, conf_id, mol_block, matched_ids, visited_ids, matched_ids_count,
-                                  visited_ids_count, parent_mol_id, parent_conf_id, 0, 0))
+        max_mol_id = cur.fetchone()[0]
+        if max_mol_id is None:
+            max_mol_id = 0
+        for parent_conf_id, mols in mols_dict.items():
+            for mol in mols:
+                smi = Chem.MolToSmiles(mol, isomericSmiles=True)
+                if smi in smiles:
+                    mol_id = smiles[smi][0]
+                else:
+                    max_mol_id += 1
+                    mol_id = max_mol_id
+                    smiles[smi] = [mol_id, 0]
+                mol.SetProp('_Name', str(mol_id))
+                visited_ids = mol.GetProp('visited_ids')
+                visited_ids_count = visited_ids.count(',') + 1
+                for conf in mol.GetConformers():
+                    conf_id = smiles[smi][1]
+                    smiles[smi][1] += 1
+                    mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
+                    matched_ids = conf.GetProp('matched_ids')
+                    matched_ids_count = matched_ids.count(',') + 1
+                    sql = 'INSERT INTO res VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+                    cur.execute(sql, (mol_id, conf_id, mol_block, matched_ids, visited_ids, matched_ids_count,
+                                      visited_ids_count, parent_mol_id, parent_conf_id, 0, 0))
         conn.commit()
 
 
@@ -664,7 +675,7 @@ def main():
         mol.SetProp('visited_ids', ids)
         for conf in mol.GetConformers():
             conf.SetProp('matched_ids', ids)
-    save_res(mols, res_db_fname)
+    save_res({None: mols}, res_db_fname)
 
     mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
 
@@ -735,8 +746,7 @@ def main():
         print(f'conf filtering and selection: {sum(len(v) for v in new_mols.values())} compounds, {round(time.perf_counter() - start2, 4)}')
 
         parent_mol_id = int(mol.GetProp('_Name'))
-        for conf_id, mols in new_mols.items():
-            save_res(mols, res_db_fname, parent_mol_id=parent_mol_id, parent_conf_id=conf_id)
+        save_res(new_mols, res_db_fname, parent_mol_id=parent_mol_id)
 
         update_db(res_db_fname, parent_mol_id, len(new_isomers))
 
