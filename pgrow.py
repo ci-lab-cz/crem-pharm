@@ -18,6 +18,7 @@ from numpy.linalg import norm
 import pandas as pd
 import sqlite3
 import time
+from math import cos, sin, pi
 
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolDescriptors
@@ -244,9 +245,66 @@ def keep_confs(mol, ids):
     return mol
 
 
+def is_collinear(p, epsilon=0.01):
+    a = np.array([xyz for label, xyz in p.get_feature_coords()])
+    a = np.around(a, 3)
+    a = np.unique(a, axis=0)
+    if a.shape[0] < 2:
+        raise ValueError('Too few pharmacophore features were supplied. At least two features with distinct '
+                         'coordinates are required.')
+    if a.shape[0] == 2:
+        return True
+    d = cdist(a, a)
+    id1, id2 = np.where(d == np.max(d))[0]   # most distant features
+    max_dist = d[id1, id2]
+    for i in set(range(d.shape[0])) - {id1, id2}:
+        if max_dist - d[i, id1] - d[i, id2] > epsilon:
+            return False
+    return True
+
+
+def get_rotate_matrix(p1, p2, theta):
+
+    # https://sites.google.com/site/glennmurray/Home/rotation-matrices-and-formulas
+    diff = [j - i for i, j in zip(p1, p2)]
+    squaredSum = sum([i ** 2 for i in diff])
+    u2, v2, w2 = [i ** 2 / squaredSum for i in diff]
+    u = u2 ** 0.5 * (1 if diff[0] >= 0 else -1)   # to keep the sign
+    v = v2 ** 0.5 * (1 if diff[1] >= 0 else -1)
+    w = w2 ** 0.5 * (1 if diff[2] >= 0 else -1)
+
+    c = cos(pi * theta / 180)
+    s = sin(pi * theta / 180)
+
+    x, y, z = p1
+
+    m = [[u2 + (v2 + w2) * c,       u * v * (1 - c) - w * s,   u * w * (1 - c) + v * s,   (x * (v2 + w2) - u * (y * v + z * w)) * (1 - c) + (y * w - z * v) * s],
+         [u * v * (1 - c) + w * s,  v2 + (u2 + w2) * c,        v * w * (1 - c) - u * s,   (y * (u2 + w2) - v * (x * u + z * w)) * (1 - c) + (z * u - x * w) * s],
+         [u * w * (1 - c) - v * s,  v * w * (1 - c) + u * s,   w2 + (u2 + v2) * c,        (z * (u2 + v2) - w * (x * u + y * v)) * (1 - c) + (x * v - y * u) * s],
+         [0, 0, 0, 1]]
+
+    return np.array(m)
+
+
+def get_rotate_matrix_from_collinear_pharm(p, theta):
+    a = np.array([xyz for label, xyz in p.get_feature_coords()])
+    a = np.around(a, 3)
+    a = np.unique(a, axis=0)
+    d = cdist(a, a)
+    id1, id2 = np.where(d == np.max(d))[0]   # most distant features
+    return get_rotate_matrix(a[id1].tolist(), a[id2].tolist(), theta)
+
+
 def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd=0.2):
 
     matches = False
+
+    # for additional sampling of collinear pharmacophores
+    theta = 20
+    if is_collinear(query_pharm):
+        rotate_mat = get_rotate_matrix_from_collinear_pharm(query_pharm, theta)
+    else:
+        rotate_mat = None
 
     query_mol = query_pharm.get_mol()
     query_nfeatures = query_mol.GetNumAtoms()
@@ -254,13 +312,12 @@ def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd=0.2):
     db = DB(db_fname)
 
     w = Chem.SDWriter(output_sdf)
-    wpkl = open(output_sdf.rsplit('.', 1)[0] + '.pkl', 'wb')
 
     mol_names = db.get_mol_names()
 
     for j, mol_name in enumerate(mol_names):
 
-        pharm = db.get_pharm(mol_name)[0]
+        pharm = db.get_pharm(mol_name)[0]   # because there is only one stereoisomer for each entry
 
         rmsd_dict = dict()
         for i, coords in enumerate(pharm):
@@ -285,8 +342,12 @@ def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd=0.2):
                 AllChem.TransformMol(m, matrix, k, keepConfs=True)
                 m.SetProp('rms', str(rms))
                 w.write(m, k)
-            m = keep_confs(m, rmsd_dict.keys())
-            pickle.dump((m, mol_name), wpkl, -1)
+                if rotate_mat is not None:  # rotate molecule if pharmacophore features are collinear
+                    for _ in range(360 // theta - 1):
+                        AllChem.TransformMol(m, rotate_mat, k, keepConfs=True)
+                        w.write(m, k)
+
+    w.close()
 
     return matches
 
@@ -551,7 +612,8 @@ def get_confs(mol, template_mol, template_conf_id, nconfs, pharm, new_pids, dist
 
     # start = time.process_time()
     try:
-        mol = __gen_confs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf=nconfs, seed=seed, coreConfId=template_conf_id)
+        mol = __gen_confs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf=nconfs, seed=seed,
+                          coreConfId=template_conf_id, ignoreSmoothingFailures=False)
     except Exception as e:
         sys.stderr.write(f'the following error was occurred for in __gen_confs ' + str(e) + '\n')
         return None
@@ -659,7 +721,6 @@ def main():
     print(p.clusters)
 
     conf_fname = os.path.join(args.output, f'iter0.sdf')
-    conf_fname_pkl = os.path.splitext(conf_fname)[0] + '.pkl'
 
     new_pids = tuple(args.ids)
 
@@ -667,7 +728,7 @@ def main():
     if not flag:
         exit('No matches between starting fragments and the chosen subpharmacophore.')
 
-    mols = select_mols([mol for mol, mol_name in read_input(conf_fname_pkl)])
+    mols = select_mols([mol for mol, mol_name in read_input(conf_fname, sdf_confs=True)])
     mols = [remove_confs_exclvol(mol, p.exclvol, args.exclusion_volume) for mol in mols]
     mols = [m for m in mols if m]
     ids = ','.join(map(str, new_pids))
