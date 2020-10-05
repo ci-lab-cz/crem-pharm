@@ -25,6 +25,7 @@ from rdkit.Chem import AllChem, rdMolDescriptors
 from rdkit.Chem.AllChem import AlignMol, EmbedMultipleConfs
 from rdkit.Chem.rdForceFieldHelpers import UFFGetMoleculeForceField
 from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
+from rdkit.Geometry.rdGeometry import Point3D
 from crem.crem import grow_mol
 from pmapper.utils import load_multi_conf_mol
 from pmapper.pharmacophore import Pharmacophore as P
@@ -304,61 +305,74 @@ def get_rotate_matrix_from_collinear_pharm(p, theta):
     return get_rotate_matrix(a[id1].tolist(), a[id2].tolist(), theta)
 
 
-def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd=0.2):
+def screen(mol_name, pharm_list, query_mol, query_nfeatures, rmsd):
 
-    matches = False
+    rmsd_dict = dict()
+    for i, coords in enumerate(pharm_list):
+        p1 = P()
+        p1.load_from_feature_coords(coords)
+        m1 = p1.get_mol()
+        min_rmsd = float('inf')
+        min_ids = None
+        for ids1 in m1.GetSubstructMatches(query_mol):
+            a = AllChem.AlignMol(Chem.Mol(m1), query_mol, atomMap=tuple(zip(ids1, range(query_nfeatures))))
+            if a < min_rmsd:
+                min_rmsd = a
+                min_ids = ids1
+        if min_rmsd <= rmsd:
+            rmsd_dict[i] = AllChem.GetAlignmentTransform(Chem.Mol(m1), query_mol,
+                                                         atomMap=tuple(zip(min_ids, range(query_nfeatures))))
+    return mol_name, rmsd_dict
+
+
+def screen_mp(items):
+    return screen(*items)
+
+
+def supply_screen(db, query_mol, rmsd):
+    n = query_mol.GetNumAtoms()
+    mol_names = db.get_mol_names()
+    for mol_name in mol_names:
+        pharm_list = db.get_pharm(mol_name)[0]   # because there is only one stereoisomer for each entry
+        yield mol_name, pharm_list, query_mol, n, rmsd
+
+
+def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd, ncpu):
+
+    db = DB(db_fname)
+    query_mol = query_pharm.get_mol()
+
+    pool = Pool(ncpu)
+    d = []
+    for mol_name, rmsd_dict in pool.imap_unordered(screen_mp, supply_screen(db, query_mol, rmsd)):
+        if rmsd_dict:
+            d.append((mol_name, rmsd_dict))
+
+    if not d:
+        return False
 
     # for additional sampling of collinear pharmacophores
-    theta = 20
+    theta = 10
     if is_collinear(query_pharm):
         rotate_mat = get_rotate_matrix_from_collinear_pharm(query_pharm, theta)
     else:
         rotate_mat = None
 
-    query_mol = query_pharm.get_mol()
-    query_nfeatures = query_mol.GetNumAtoms()
-
-    db = DB(db_fname)
-
     w = Chem.SDWriter(output_sdf)
-
-    mol_names = db.get_mol_names()
-
-    for j, mol_name in enumerate(mol_names):
-
-        pharm = db.get_pharm(mol_name)[0]   # because there is only one stereoisomer for each entry
-
-        rmsd_dict = dict()
-        for i, coords in enumerate(pharm):
-            p1 = P()
-            p1.load_from_feature_coords(coords)
-            m1 = p1.get_mol()
-            min_rmsd = float('inf')
-            min_ids = None
-            for ids1 in m1.GetSubstructMatches(query_mol):
-                a = AllChem.AlignMol(Chem.Mol(m1), query_mol, atomMap=tuple(zip(ids1, range(query_nfeatures))))
-                if a < min_rmsd:
-                    min_rmsd = a
-                    min_ids = ids1
-            if min_rmsd <= rmsd:
-                rmsd_dict[i] = AllChem.GetAlignmentTransform(Chem.Mol(m1), query_mol, atomMap=tuple(zip(min_ids, range(query_nfeatures))))
-
-        if rmsd_dict:
-            matches = True
-            m = db.get_mol(mol_name)[0]
-            m.SetProp('_Name', mol_name)
-            for k, (rms, matrix) in rmsd_dict.items():
-                AllChem.TransformMol(m, matrix, k, keepConfs=True)
-                m.SetProp('rms', str(rms))
-                w.write(m, k)
-                if rotate_mat is not None:  # rotate molecule if pharmacophore features are collinear
-                    for _ in range(360 // theta - 1):
-                        AllChem.TransformMol(m, rotate_mat, k, keepConfs=True)
-                        w.write(m, k)
-
+    for mol_name, rmsd_dict in d:
+        m = db.get_mol(mol_name)[0]
+        m.SetProp('_Name', mol_name)
+        for k, (rms, matrix) in rmsd_dict.items():
+            AllChem.TransformMol(m, matrix, k, keepConfs=True)
+            m.SetProp('rms', str(rms))
+            w.write(m, k)
+            if rotate_mat is not None:  # rotate molecule if pharmacophore features are collinear
+                for _ in range(360 // theta - 1):
+                    AllChem.TransformMol(m, rotate_mat, k, keepConfs=True)
+                    w.write(m, k)
     w.close()
 
-    return matches
+    return True
 
 
 def fused_ring_atoms(m):
@@ -443,40 +457,58 @@ def create_db(db_fname):
                     "parent_mol_id INTEGER, "
                     "parent_conf_id INTEGER, "
                     "nmols INTEGER NOT NULL, "
-                    "used INTEGER NOT NULL)")
+                    "used INTEGER NOT NULL, "
+                    "time TEXT NOT NULL)")
         conn.commit()
 
 
-def save_res(mols_dict, db_fname, parent_mol_id=None):
-    # mols - dict {parent_conf_id: [mol1, mol2, ...], ...}
-    smiles = dict()  # {smi: (mol_id, max_conf_id), ...}
+def merge_confs(mols_dict):
+    # mols_dict - dict {parent_conf_id: [mol1, mol2, ...], ...}
+    # molecules with identical smiles are combined into one with multiple conformers
+    smiles = dict()  # {smi: Mol, ...}
+    for parent_conf_id, mols in mols_dict.items():
+        for mol in mols:
+            visited_ids = mol.GetProp('visited_ids')
+            for c in mol.GetConformers():
+                c.SetProp('parent_conf_id', str(parent_conf_id))
+                c.SetProp('visited_ids', visited_ids)
+            smi = Chem.MolToSmiles(mol, isomericSmiles=True)
+            if smi not in smiles:
+                smiles[smi] = Chem.Mol(mol)
+            else:
+                ids = smiles[smi].GetSubstructMatch(mol, useChirality=True)
+                for c in mol.GetConformers():
+                    pos = c.GetPositions()
+                    for query_id, atom_id in enumerate(ids):
+                        x, y, z = pos[query_id,]
+                        c.SetAtomPosition(atom_id, Point3D(x, y, z))
+                    smiles[smi].AddConformer(c, assignId=True)
+    return smiles.values()
+
+
+def save_res(mols, db_fname, parent_mol_id=None):
+
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
         cur.execute('SELECT MAX(mol_id) FROM res')
-        max_mol_id = cur.fetchone()[0]
-        if max_mol_id is None:
-            max_mol_id = 0
-        for parent_conf_id, mols in mols_dict.items():
-            for mol in mols:
-                smi = Chem.MolToSmiles(mol, isomericSmiles=True)
-                if smi in smiles:
-                    mol_id = smiles[smi][0]
-                else:
-                    max_mol_id += 1
-                    mol_id = max_mol_id
-                    smiles[smi] = [mol_id, 0]
-                mol.SetProp('_Name', str(mol_id))
-                visited_ids = mol.GetProp('visited_ids')
+        mol_id = cur.fetchone()[0]
+        if mol_id is None:
+            mol_id = 0
+        for mol in mols:
+            mol_id += 1
+            mol.SetProp('_Name', str(mol_id))
+            for conf_id, conf in enumerate(mol.GetConformers()):
+                mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
+                visited_ids = conf.GetProp('visited_ids')
                 visited_ids_count = visited_ids.count(',') + 1
-                for conf in mol.GetConformers():
-                    conf_id = smiles[smi][1]
-                    smiles[smi][1] += 1
-                    mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
-                    matched_ids = conf.GetProp('matched_ids')
-                    matched_ids_count = matched_ids.count(',') + 1
-                    sql = 'INSERT INTO res VALUES (?,?,?,?,?,?,?,?,?,?,?)'
-                    cur.execute(sql, (mol_id, conf_id, mol_block, matched_ids, visited_ids, matched_ids_count,
-                                      visited_ids_count, parent_mol_id, parent_conf_id, 0, 0))
+                matched_ids = conf.GetProp('matched_ids')
+                matched_ids_count = matched_ids.count(',') + 1
+                parent_conf_id = conf.GetProp('parent_conf_id')
+                if parent_conf_id == 'None':
+                    parent_conf_id = None
+                sql = 'INSERT INTO res VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
+                cur.execute(sql, (mol_id, conf_id, mol_block, matched_ids, visited_ids, matched_ids_count,
+                                  visited_ids_count, parent_mol_id, parent_conf_id, 0, 0))
         conn.commit()
 
 
@@ -733,9 +765,15 @@ def main():
 
     new_pids = tuple(args.ids)
 
-    flag = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments, output_sdf=conf_fname)
+    print(f"===== Initial screening =====")
+    start = time.perf_counter()
+
+    flag = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments,
+                          output_sdf=conf_fname, rmsd=0.2, ncpu=args.ncpu)
     if not flag:
         exit('No matches between starting fragments and the chosen subpharmacophore.')
+
+    print(f'{round(time.perf_counter() - start, 4)}')
 
     mols = select_mols([mol for mol, mol_name in read_input(conf_fname, sdf_confs=True)])
     mols = [remove_confs_exclvol(mol, p.exclvol, args.exclusion_volume) for mol in mols]
@@ -745,7 +783,9 @@ def main():
         mol.SetProp('visited_ids', ids)
         for conf in mol.GetConformers():
             conf.SetProp('matched_ids', ids)
-    save_res({None: mols}, res_db_fname)
+    mols = merge_confs({None: mols})   # return list of mols
+    mols = [remove_confs_rms(m) for m in mols]
+    save_res(mols, res_db_fname)
 
     mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
 
@@ -813,12 +853,17 @@ def main():
         for conf_id in new_mols:
             new_mols[conf_id] = select_mols(new_mols[conf_id])
 
-        print(f'conf filtering and selection: {sum(len(v) for v in new_mols.values())} compounds, {round(time.perf_counter() - start2, 4)}')
+        print(f'conf filtering and mol selection: {sum(len(v) for v in new_mols.values())} compounds, {round(time.perf_counter() - start2, 4)}')
+
+        new_mols = merge_confs(new_mols)   # return list of mols
+        new_mols = [remove_confs_rms(m, args.dist) for m in new_mols]
 
         parent_mol_id = int(mol.GetProp('_Name'))
         save_res(new_mols, res_db_fname, parent_mol_id=parent_mol_id)
 
         update_db(res_db_fname, parent_mol_id, len(new_isomers))
+
+        print('saved mols:', len(new_mols))
 
         search_deep = True
         if mol.GetProp('visited_ids').count(',') + 1 == p.get_num_features() or not new_mols:
@@ -826,7 +871,6 @@ def main():
         print('search deep: ', search_deep)
         mol = choose_mol_to_grow(res_db_fname, p.get_num_features(), search_deep=search_deep)
 
-        print('selected mols:', sum(len(v) for v in new_mols.values()))
         print(f'overall time {round(time.perf_counter() - start, 4)}')
 
         sys.stdout.flush()
