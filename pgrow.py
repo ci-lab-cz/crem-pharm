@@ -206,10 +206,19 @@ def remove_confs_rms(mol, rms=0.5):
 
     remove_ids = []
     mol_tmp = Chem.RemoveHs(mol)   # calc rms for heavy atoms only
-    cids = [c.GetId() for c in mol_tmp.GetConformers()]
+    match_ids = mol_tmp.GetSubstructMatches(mol_tmp, uniquify=False, useChirality=True)
 
-    rms_list = [(i1, i2, norm(mol_tmp.GetConformer(i1).GetPositions() - mol_tmp.GetConformer(i2).GetPositions()))
-                for i1, i2 in combinations(cids, 2)]
+    # determine best rms taking into account symmetry of a molecule
+    rms_list = []
+    cids = [c.GetId() for c in mol_tmp.GetConformers()]
+    for i, j in combinations(cids, 2):
+        best_rms = float('inf')
+        for ids in match_ids:
+            rms = norm(mol_tmp.GetConformer(i).GetPositions() - mol_tmp.GetConformer(j).GetPositions()[ids, ])
+            if rms < best_rms:
+                best_rms = rms
+        rms_list.append((i, j, best_rms))
+
     while any(item[2] < rms for item in rms_list):
         for item in rms_list:
             if item[2] < rms:
