@@ -31,6 +31,8 @@ from pmapper.utils import load_multi_conf_mol
 from pmapper.pharmacophore import Pharmacophore as P
 from psearch.database import DB
 from read_input import read_input
+from openbabel import openbabel as ob
+from openbabel import pybel
 
 
 class PharmModel2(P):
@@ -179,10 +181,53 @@ def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreC
     return mol
 
 
-def __gen_confs(mol, template_mol=None, nconf=10, seed=42, **kwargs):
+def __embed_multiple_confs_constrained_ob(mol, template_mol, nconf, seed=42, **kwargs):
+    # generate constrained conformers using OpenBabel, if fails use RDKit
+    # **kwargs arguments are for RDKit generator
+
+    mol = AllChem.ConstrainedEmbed(Chem.AddHs(mol), template_mol, randomseed=seed)
+    ids = set(range(mol.GetNumAtoms())) - set(mol.GetSubstructMatch(template_mol))
+    ids = [i + 1 for i in ids]   # ids of atoms to rotate
+    mol_rdkit = mol
+
+    mol = pybel.readstring('mol', Chem.MolToMolBlock(mol)).OBMol   # convert mol from RDKit to OB
+
+    pff = ob.OBForceField_FindType("mmff94")
+    if not pff.Setup(mol):  # if OB FF setup fails use RDKit conformer generation (slower)
+        return ConstrainedEmbedMultipleConfs(Chem.AddHs(mol_rdkit), Chem.RemoveHs(template_mol), nconf, randomseed=seed, **kwargs)
+
+    constraints = ob.OBFFConstraints()
+    for atom in ob.OBMolAtomIter(mol):
+        atom_id = atom.GetIndex() + 1
+        if atom_id not in ids:
+            constraints.AddAtomConstraint(atom_id)
+    pff.SetConstraints(constraints)
+
+    pff.DiverseConfGen(0.5, 1000, 50, False)   # rmsd, nconf_tries, energy, verbose
+
+    pff.GetConformers(mol)
+    obconversion = ob.OBConversion()
+    obconversion.SetOutFormat('mol')
+
+    output_strings = []
+    for conf_num in range(max(0, mol.NumConformers() - nconf), mol.NumConformers()):   # save last nconf conformers (it seems the last one is the original conformer)
+        mol.SetConformer(conf_num)
+        output_strings.append(obconversion.WriteString(mol))
+
+    out_mol = Chem.MolFromMolBlock(output_strings[0])
+    for a in output_strings[1:]:
+        out_mol.AddConformer(Chem.MolFromMolBlock(a).GetConformer(0), assignId=True)
+    return out_mol
+
+
+def __gen_confs(mol, template_mol=None, nconf=10, seed=42, alg='rdkit', **kwargs):
+    # alg - 'rdkit' or 'ob'
     try:
         if template_mol:
-            mol = ConstrainedEmbedMultipleConfs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf, randomseed=seed, **kwargs)
+            if alg == 'rdkit':
+                mol = ConstrainedEmbedMultipleConfs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf, randomseed=seed, **kwargs)
+            elif alg == 'ob':
+                mol = __embed_multiple_confs_constrained_ob(mol, template_mol, nconf, seed, **kwargs)
         else:
             AllChem.EmbedMultipleConfs(Chem.AddHs(mol), numConfs=nconf, maxAttempts=nconf*4, randomSeed=seed)
     except ValueError:
@@ -649,11 +694,11 @@ def remove_confs_match(mol, pharm, matched_ids, new_ids, dist):
         return mol
 
 
-def get_confs(mol, template_mol, template_conf_id, nconfs, pharm, new_pids, dist, evol, seed):
+def get_confs(mol, template_mol, template_conf_id, nconfs, conf_alg, pharm, new_pids, dist, evol, seed):
 
     # start = time.process_time()
     try:
-        mol = __gen_confs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf=nconfs, seed=seed,
+        mol = __gen_confs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf=nconfs, alg=conf_alg, seed=seed,
                           coreConfId=template_conf_id, ignoreSmoothingFailures=False)
     except Exception as e:
         sys.stderr.write(f'the following error was occurred for in __gen_confs ' + str(e) + '\n')
@@ -725,6 +770,8 @@ def main():
                              'fragment selection.')
     parser.add_argument('-n', '--nconf', metavar='INTEGER', required=False, type=int, default=20,
                         help='number of conformers generated per structure. Default: 20.')
+    parser.add_argument('--conf_gen', metavar='STRING', required=False, type=str, default='rdkit',
+                        help='can take "rdkit" or "ob" values to choose conformer generator. Default: rdkit.')
     parser.add_argument('-s', '--seed', metavar='INTEGER', required=False, type=int, default=-1,
                         help='seed for random number generator to get reproducible output. Default: -1.')
     parser.add_argument('--dist', metavar='NUMERIC', required=False, type=float, default=1,
@@ -818,6 +865,7 @@ def main():
                                                        template_mol=mol,
                                                        template_conf_id=conf_id,
                                                        nconfs=args.nconf,
+                                                       conf_alg=args.conf_gen,
                                                        pharm=p,
                                                        new_pids=new_pids,
                                                        dist=args.dist,
