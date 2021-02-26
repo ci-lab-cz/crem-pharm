@@ -14,7 +14,6 @@ from scipy.spatial.distance import cdist
 from itertools import combinations, product
 from operator import itemgetter
 import numpy as np
-from numpy.linalg import norm
 import pandas as pd
 import sqlite3
 import time
@@ -260,7 +259,7 @@ def remove_confs_rms(mol, rms=0.5):
     for i, j in combinations(cids, 2):
         best_rms = float('inf')
         for ids in match_ids:
-            rms = norm(mol_tmp.GetConformer(i).GetPositions() - mol_tmp.GetConformer(j).GetPositions()[ids, ])
+            rms = np.sqrt(np.mean(np.sum((mol_tmp.GetConformer(i).GetPositions() - mol_tmp.GetConformer(j).GetPositions()[ids, ]) ** 2, axis=1)))
             if rms < best_rms:
                 best_rms = rms
         rms_list.append((i, j, best_rms))
