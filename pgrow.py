@@ -241,6 +241,10 @@ def get_grow_points2(mol_xyz, pharm_xyz, tol=2):
 
 
 def get_grow_atom_ids(mol, pharm_xyz, tol=2):
+
+    # use all atoms from ligand, even if they do not have H
+    # if the closest atom does not have hydrogen and no atoms without 2A, then no relevant grow points will be
+
     ids = set()
     for c in mol.GetConformers():
         ids.update(get_grow_points2(c.GetPositions(), pharm_xyz, tol))
@@ -350,6 +354,9 @@ def get_rotate_matrix_from_collinear_pharm(p, theta):
 
 
 def screen(mol_name, pharm_list, query_mol, query_nfeatures, rmsd):
+
+    # return one map, this can be a problem for fragments with different orientations and the same rmsd
+    # [NH2]c1nc([NH2])ncc1 - of two NH2 and n between were matched
 
     rmsd_dict = dict()
     for i, coords in enumerate(pharm_list):
@@ -461,6 +468,13 @@ def check_substr_mols(small, large):
 
 
 def select_mols(mols):
+    """
+    Remove those molecules which are superstructure of another one. Thus, if CO and CCO matched a pharmacophore
+    the latter is superfluous and can be removed. It is expected that if needed the former will be able to grow
+    to CCO and further.
+    :param mols:
+    :return:
+    """
     mols = [(Chem.RemoveHs(mol), mol.GetNumHeavyAtoms()) for mol in mols]
     mols = sorted(mols, key=itemgetter(1))
     hacs = np.array([item[1] for item in mols])
@@ -520,6 +534,7 @@ def merge_confs(mols_dict):
             if smi not in smiles:
                 smiles[smi] = Chem.Mol(mol)
             else:
+                # atoms of additional conformers are renumbered according to already stored structure
                 ids = smiles[smi].GetSubstructMatch(mol, useChirality=True)
                 for c in mol.GetConformers():
                     pos = c.GetPositions()
