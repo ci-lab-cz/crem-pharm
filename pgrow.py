@@ -724,7 +724,7 @@ def get_confs(mol, template_mol, template_conf_id, nconfs, conf_alg, pharm, new_
     # print(f'__gen_conf: {mol.GetNumConformers()} confs, {time.process_time() - start}')
     # start = time.process_time()
 
-    mol = remove_confs_rms(mol, rms=dist)
+    mol = remove_confs_rms(mol)
 
     # print(f'remove_confs_rms: {mol.GetNumConformers()} confs, {time.process_time() - start}')
     # start = time.process_time()
@@ -918,7 +918,7 @@ def main():
         print(f'conf filtering and mol selection: {sum(len(v) for v in new_mols.values())} compounds, {round(time.perf_counter() - start2, 4)}')
 
         new_mols = merge_confs(new_mols)   # return list of mols
-        new_mols = [remove_confs_rms(m, args.dist) for m in new_mols]
+        new_mols = [remove_confs_rms(m) for m in new_mols]
 
         parent_mol_id = int(mol.GetProp('_Name'))
         save_res(new_mols, res_db_fname, parent_mol_id=parent_mol_id)
