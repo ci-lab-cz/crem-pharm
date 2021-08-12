@@ -867,6 +867,7 @@ def main():
                                  ncores=args.ncpu, **kwargs))
 
         print(f'mol grow: {len(new_mols)} mols, {round(time.perf_counter() - start, 4)}')
+        sys.stdout.flush()
         start2 = time.perf_counter()
 
         new_isomers = []
@@ -874,6 +875,7 @@ def main():
             new_isomers.extend(isomers)
 
         print(f'stereo enumeration: {len(new_isomers)} isomers, {round(time.perf_counter() - start2, 4)}')
+        sys.stdout.flush()
         start2 = time.perf_counter()
 
         new_mols = defaultdict(list)
