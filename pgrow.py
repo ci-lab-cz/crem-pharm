@@ -242,13 +242,17 @@ def get_grow_points2(mol_xyz, pharm_xyz, tol=2):
 
 def get_grow_atom_ids(mol, pharm_xyz, tol=2):
 
-    # use all atoms from ligand, even if they do not have H
-    # if the closest atom does not have hydrogen and no atoms without 2A, then no relevant grow points will be
+    # search for the closest growing points among heavy atoms with attached hydrogens only
 
     ids = set()
+    atoms_with_h = []
+    for a in mol.GetAtoms():
+        if a.GetAtomicNum() > 1 and a.GetTotalNumHs() > 0:
+            atoms_with_h.append(a.GetIdx())
     for c in mol.GetConformers():
-        ids.update(get_grow_points2(c.GetPositions(), pharm_xyz, tol))
-    return list(sorted(ids))
+        ids.update(get_grow_points2(c.GetPositions()[atoms_with_h], pharm_xyz, tol))
+    res = list(sorted(atoms_with_h[i] for i in ids))
+    return res
 
 
 def remove_confs_rms(mol, rms=0.5):
