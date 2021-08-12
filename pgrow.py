@@ -9,7 +9,7 @@ import pickle
 from sklearn.cluster import AgglomerativeClustering
 from collections import defaultdict, Counter
 from multiprocessing import Pool
-from functools import partial
+# from functools import partial
 from scipy.spatial.distance import cdist
 from itertools import combinations, product
 from operator import itemgetter
@@ -21,8 +21,8 @@ from math import cos, sin, pi
 
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolDescriptors
-from rdkit.Chem.AllChem import AlignMol, EmbedMultipleConfs
-from rdkit.Chem.rdForceFieldHelpers import UFFGetMoleculeForceField
+# from rdkit.Chem.AllChem import AlignMol, EmbedMultipleConfs
+# from rdkit.Chem.rdForceFieldHelpers import UFFGetMoleculeForceField
 from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
 from rdkit.Geometry.rdGeometry import Point3D
 from crem.crem import grow_mol
@@ -32,6 +32,8 @@ from psearch.database import DB
 from read_input import read_input
 from openbabel import openbabel as ob
 from openbabel import pybel
+from dask.distributed import Client
+from dask import bag
 
 
 class PharmModel2(P):
@@ -123,8 +125,7 @@ def gen_stereo(mol):
     return isomers
 
 
-def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreConfId=-1, randomseed=2342,
-                                  getForceField=UFFGetMoleculeForceField, **kwargs):
+def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreConfId=-1, randomseed=2342, **kwargs):
 
     match = mol.GetSubstructMatch(core)
     if not match:
@@ -135,7 +136,7 @@ def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreC
         corePtI = coreConf.GetAtomPosition(i)
         coordMap[idxI] = corePtI
 
-    cids = EmbedMultipleConfs(mol, numConfs=numConfs, coordMap=coordMap, randomSeed=randomseed, **kwargs)
+    cids = AllChem.EmbedMultipleConfs(mol, numConfs=numConfs, coordMap=coordMap, randomSeed=randomseed, **kwargs)
     cids = list(cids)
     if len(cids) == 0:
         raise ValueError('Could not embed molecule.')
@@ -145,7 +146,7 @@ def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreC
     if not useTethers:
         # clean up the conformation
         for cid in cids:
-            ff = getForceField(mol, confId=cid)
+            ff = Chem.rdForceFieldHelpers.UFFGetMoleculeForceField(mol, confId=cid)
             for i, idxI in enumerate(match):
                 for j in range(i + 1, len(match)):
                     idxJ = match[j]
@@ -158,12 +159,12 @@ def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreC
                 more = ff.Minimize()
                 n -= 1
             # rotate the embedded conformation onto the core:
-            rms = AlignMol(mol, core, atomMap=algMap)
+            rms = AllChem.AlignMol(mol, core, atomMap=algMap)
     else:
         # rotate the embedded conformation onto the core:
         for cid in cids:
-            rms = AlignMol(mol, core, prbCid=cid, atomMap=algMap)
-            ff = getForceField(mol, confId=cid)
+            rms = AllChem.AlignMol(mol, core, prbCid=cid, atomMap=algMap)
+            ff = Chem.rdForceFieldHelpers.UFFGetMoleculeForceField(mol, confId=cid)
             conf = core.GetConformer()
             for i in range(core.GetNumAtoms()):
                 p = conf.GetAtomPosition(i)
@@ -176,7 +177,7 @@ def ConstrainedEmbedMultipleConfs(mol, core, numConfs=10, useTethers=True, coreC
                 more = ff.Minimize(energyTol=1e-4, forceTol=1e-3)
                 n -= 1
             # realign
-            rms = AlignMol(mol, core, prbCid=cid, atomMap=algMap)
+            rms = AllChem.AlignMol(mol, core, prbCid=cid, atomMap=algMap)
     return mol
 
 
@@ -228,7 +229,8 @@ def __gen_confs(mol, template_mol=None, nconf=10, seed=42, alg='rdkit', **kwargs
             elif alg == 'ob':
                 mol = __embed_multiple_confs_constrained_ob(mol, template_mol, nconf, seed, **kwargs)
         else:
-            AllChem.EmbedMultipleConfs(Chem.AddHs(mol), numConfs=nconf, maxAttempts=nconf*4, randomSeed=seed)
+            mol = Chem.AddHs(mol)
+            AllChem.EmbedMultipleConfs(mol, numConfs=nconf, maxAttempts=nconf*4, randomSeed=seed)
     except ValueError:
         return None
     return mol
@@ -255,7 +257,7 @@ def get_grow_atom_ids(mol, pharm_xyz, tol=2):
     return res
 
 
-def remove_confs_rms(mol, rms=0.5):
+def remove_confs_rms(mol, rms=0.25):
 
     remove_ids = []
     mol_tmp = Chem.RemoveHs(mol)   # calc rms for heavy atoms only
@@ -712,18 +714,21 @@ def remove_confs_match(mol, pharm, matched_ids, new_ids, dist):
         return mol
 
 
-def get_confs(mol, template_mol, template_conf_id, nconfs, conf_alg, pharm, new_pids, dist, evol, seed):
+def get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_pids, dist, evol, seed):
+
+    Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+    mol = Chem.AddHs(mol)
 
     # start = time.process_time()
     try:
-        mol = __gen_confs(Chem.AddHs(mol), Chem.RemoveHs(template_mol), nconf=nconfs, alg=conf_alg, seed=seed,
+        mol = __gen_confs(mol, Chem.RemoveHs(template_mol), nconf=nconfs, alg=conf_alg, seed=seed,
                           coreConfId=template_conf_id, ignoreSmoothingFailures=False)
     except Exception as e:
         sys.stderr.write(f'the following error was occurred for in __gen_confs ' + str(e) + '\n')
-        return None
+        return template_conf_id, None
 
     if not mol:
-        return None
+        return template_conf_id, None
 
     # print(f'__gen_conf: {mol.GetNumConformers()} confs, {time.process_time() - start}')
     # start = time.process_time()
@@ -735,7 +740,7 @@ def get_confs(mol, template_mol, template_conf_id, nconfs, conf_alg, pharm, new_
 
     mol = remove_confs_exclvol(mol, pharm.exclvol, evol)
     if not mol:
-        return None
+        return template_conf_id, None
 
     # print(f'remove_confs_exclvol: {mol.GetNumConformers()} confs, {time.process_time() - start}')
     # start = time.process_time()
@@ -749,10 +754,10 @@ def get_confs(mol, template_mol, template_conf_id, nconfs, conf_alg, pharm, new_
     # print(f'remove_confs_match: {mol.GetNumConformers() if mol else None} confs, {time.process_time() - start}')
 
     if not mol:
-        return None
+        return template_conf_id, None
 
     mol.SetProp('visited_ids', template_mol.GetProp('visited_ids') + ',' + ','.join(map(str, new_pids)))
-    return mol
+    return template_conf_id, mol
 
 
 def get_features(p, pids, add_features):
@@ -798,12 +803,23 @@ def main():
                         help='radius of exclusion volumes (distance to heavy atoms). By default exclusion volumes are '
                              'disabled even if they are present in a query pharmacophore. To enable them set '
                              'a positive numeric value.')
+    parser.add_argument('-u', '--hostfile', metavar='FILENAME', required=True, type=str, default=None,
+                        help='text file with addresses of nodes of dask SSH cluster. The most typical, it can be '
+                             'passed as $PBS_NODEFILE variable from inside a PBS script. The first line in this file '
+                             'will be the address of the scheduler running on the standard port 8786. If omitted, '
+                             'calculations will run on a single machine as usual.')
+    parser.add_argument('-w', '--num_workers', metavar='INTEGER', required=False, type=int, default=100,
+                        help='the number of workers to be spawn by the dask cluster. For efficiency it seems that '
+                             'it should be equal to the total number of cores requested by the cluster. Default: 100.')
     parser.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
                         help='number of cpu cores to use. Default: 1.')
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 
     args = parser.parse_args()
+
+    pool = Pool(args.ncpu)
+    dask_client = Client(open(args.hostfile).readline().strip() + ':8786')
 
     if not os.path.isdir(args.output):
         os.makedirs(args.output, exist_ok=True)
@@ -812,8 +828,6 @@ def main():
         f.write(json.dumps(vars(args), indent=4))
 
     shutil.copyfile(args.query, os.path.join(args.output, os.path.basename(args.query)))
-
-    pool = Pool(args.ncpu)
 
     args.ids = tuple(sorted(set(args.ids)))
 
@@ -879,21 +893,18 @@ def main():
         start2 = time.perf_counter()
 
         new_mols = defaultdict(list)
-        for conf in mol.GetConformers():
-            conf_id = conf.GetId()
-            for new_mol in pool.imap_unordered(partial(get_confs,
-                                                       template_mol=mol,
-                                                       template_conf_id=conf_id,
-                                                       nconfs=args.nconf,
-                                                       conf_alg=args.conf_gen,
-                                                       pharm=p,
-                                                       new_pids=new_pids,
-                                                       dist=args.dist,
-                                                       evol=args.exclusion_volume,
-                                                       seed=args.seed),
-                                               new_isomers):
-                if new_mol:
-                    new_mols[conf_id].append(new_mol)
+        inputs = [(new_isomer, conf.GetId()) for conf in mol.GetConformers() for new_isomer in new_isomers]
+        b = bag.from_sequence(inputs, npartitions=args.num_workers * 2)
+        for conf_id, m in b.starmap(get_confs, template_mol=mol,
+                                               nconfs=args.nconf,
+                                               conf_alg=args.conf_gen,
+                                               pharm=p,
+                                               new_pids=new_pids,
+                                               dist=args.dist,
+                                               evol=args.exclusion_volume,
+                                               seed=args.seed).compute():
+            if m:
+                new_mols[conf_id].append(m)
 
         print(f'conf generation: {sum(len(v) for v in new_mols.values())} molecules, {round(time.perf_counter() - start2, 4)}')
         start2 = time.perf_counter()
