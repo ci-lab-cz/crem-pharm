@@ -805,7 +805,7 @@ def main():
                         help='radius of exclusion volumes (distance to heavy atoms). By default exclusion volumes are '
                              'disabled even if they are present in a query pharmacophore. To enable them set '
                              'a positive numeric value.')
-    parser.add_argument('-u', '--hostfile', metavar='FILENAME', required=True, type=str, default=None,
+    parser.add_argument('-u', '--hostfile', metavar='FILENAME', required=False, type=str, default=None,
                         help='text file with addresses of nodes of dask SSH cluster. The most typical, it can be '
                              'passed as $PBS_NODEFILE variable from inside a PBS script. The first line in this file '
                              'will be the address of the scheduler running on the standard port 8786. If omitted, '
