@@ -9,7 +9,7 @@ import pickle
 from sklearn.cluster import AgglomerativeClustering
 from collections import defaultdict, Counter
 from multiprocessing import Pool
-# from functools import partial
+from functools import partial
 from scipy.spatial.distance import cdist
 from itertools import combinations, product
 from operator import itemgetter
@@ -818,8 +818,9 @@ def main():
 
     args = parser.parse_args()
 
+    if args.hostfile is not None:
+        dask_client = Client(open(args.hostfile).readline().strip() + ':8786')
     pool = Pool(args.ncpu)
-    dask_client = Client(open(args.hostfile).readline().strip() + ':8786')
 
     if not os.path.isdir(args.output):
         os.makedirs(args.output, exist_ok=True)
@@ -894,17 +895,30 @@ def main():
 
         new_mols = defaultdict(list)
         inputs = [(new_isomer, conf.GetId()) for conf in mol.GetConformers() for new_isomer in new_isomers]
-        b = bag.from_sequence(inputs, npartitions=args.num_workers * 2)
-        for conf_id, m in b.starmap(get_confs, template_mol=mol,
-                                               nconfs=args.nconf,
-                                               conf_alg=args.conf_gen,
-                                               pharm=p,
-                                               new_pids=new_pids,
-                                               dist=args.dist,
-                                               evol=args.exclusion_volume,
-                                               seed=args.seed).compute():
-            if m:
-                new_mols[conf_id].append(m)
+
+        if args.hostfile is not None:
+            b = bag.from_sequence(inputs, npartitions=args.num_workers * 2)
+            for conf_id, m in b.starmap(get_confs, template_mol=mol,
+                                                   nconfs=args.nconf,
+                                                   conf_alg=args.conf_gen,
+                                                   pharm=p,
+                                                   new_pids=new_pids,
+                                                   dist=args.dist,
+                                                   evol=args.exclusion_volume,
+                                                   seed=args.seed).compute():
+                if m:
+                    new_mols[conf_id].append(m)
+        else:
+            for conf_id, m in pool.starmap(partial(get_confs, template_mol=mol,
+                                                              nconfs=args.nconf,
+                                                              conf_alg=args.conf_gen,
+                                                              pharm=p,
+                                                              new_pids=new_pids,
+                                                              dist=args.dist,
+                                                              evol=args.exclusion_volume,
+                                                              seed=args.seed), inputs):
+                if m:
+                    new_mols[conf_id].append(m)
 
         print(f'conf generation: {sum(len(v) for v in new_mols.values())} molecules, {round(time.perf_counter() - start2, 4)}')
         start2 = time.perf_counter()
