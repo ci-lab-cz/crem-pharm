@@ -781,7 +781,9 @@ def main():
     parser.add_argument('--ids', metavar='INTEGER', required=True, nargs='+', type=int,
                         help='ids of pharmacophore features used for initial screening. 0-index based.')
     parser.add_argument('-o', '--output', metavar='DIRNAME', required=True,
-                        help='path to directory where intermediate and final results will be stored.')
+                        help='path to directory where intermediate and final results will be stored. '
+                             'If output db file (res.db) exists in the directory the computation will be continued '
+                             '(skip screening of initial fragment DB).')
     parser.add_argument('-t', '--clustering_threshold', metavar='NUMERIC', required=False, type=float, default=3,
                         help='threshold to determine clusters. Default: 3.')
     parser.add_argument('-f', '--fragments', metavar='FILENAME', required=True,
@@ -832,42 +834,47 @@ def main():
 
     args.ids = tuple(sorted(set(args.ids)))
 
-    res_db_fname = os.path.join(args.output, 'res.db')
-    create_db(res_db_fname)
-
     p = PharmModel2()
     p.load_from_xyz(args.query)
     p.set_clusters(args.clustering_threshold, args.ids)
 
     print(p.clusters)
 
-    conf_fname = os.path.join(args.output, f'iter0.sdf')
+    res_db_fname = os.path.join(args.output, 'res.db')
 
-    new_pids = tuple(args.ids)
+    if os.path.isfile(res_db_fname):  # restart if db existed
+        mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
 
-    print(f"===== Initial screening =====")
-    start = time.perf_counter()
+    else:
+        create_db(res_db_fname)
 
-    flag = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments,
-                          output_sdf=conf_fname, rmsd=0.2, ncpu=args.ncpu)
-    if not flag:
-        exit('No matches between starting fragments and the chosen subpharmacophore.')
+        conf_fname = os.path.join(args.output, f'iter0.sdf')
 
-    print(f'{round(time.perf_counter() - start, 4)}')
+        new_pids = tuple(args.ids)
 
-    mols = select_mols([mol for mol, mol_name in read_input(conf_fname, sdf_confs=True)])
-    mols = [remove_confs_exclvol(mol, p.exclvol, args.exclusion_volume) for mol in mols]
-    mols = [m for m in mols if m]
-    ids = ','.join(map(str, new_pids))
-    for mol in mols:
-        mol.SetProp('visited_ids', ids)
-        for conf in mol.GetConformers():
-            conf.SetProp('matched_ids', ids)
-    mols = merge_confs({None: mols})   # return list of mols
-    mols = [remove_confs_rms(m) for m in mols]
-    save_res(mols, res_db_fname)
+        print(f"===== Initial screening =====")
+        start = time.perf_counter()
 
-    mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
+        flag = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments,
+                              output_sdf=conf_fname, rmsd=0.2, ncpu=args.ncpu)
+        if not flag:
+            exit('No matches between starting fragments and the chosen subpharmacophore.')
+
+        print(f'{round(time.perf_counter() - start, 4)}')
+
+        mols = select_mols([mol for mol, mol_name in read_input(conf_fname, sdf_confs=True)])
+        mols = [remove_confs_exclvol(mol, p.exclvol, args.exclusion_volume) for mol in mols]
+        mols = [m for m in mols if m]
+        ids = ','.join(map(str, new_pids))
+        for mol in mols:
+            mol.SetProp('visited_ids', ids)
+            for conf in mol.GetConformers():
+                conf.SetProp('matched_ids', ids)
+        mols = merge_confs({None: mols})   # return list of mols
+        mols = [remove_confs_rms(m) for m in mols]
+        save_res(mols, res_db_fname)
+
+        mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
 
     while mol:
 
