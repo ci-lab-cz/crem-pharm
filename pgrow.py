@@ -509,8 +509,8 @@ def save_mols(mols, sdf_fname):
 def create_db(db_fname):
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
-        cur.execute("DROP TABLE IF EXISTS res")
-        cur.execute("CREATE TABLE res("
+        cur.execute("DROP TABLE IF EXISTS mols")
+        cur.execute("CREATE TABLE mols("
                     "mol_id INTEGER NOT NULL, "
                     "conf_id INTEGER NOT NULL, "
                     "mol_block TEXT NOT NULL, "
@@ -555,7 +555,7 @@ def save_res(mols, db_fname, parent_mol_id=None):
 
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
-        cur.execute('SELECT MAX(mol_id) FROM res')
+        cur.execute('SELECT MAX(mol_id) FROM mols')
         mol_id = cur.fetchone()[0]
         if mol_id is None:
             mol_id = 0
@@ -571,7 +571,7 @@ def save_res(mols, db_fname, parent_mol_id=None):
                 parent_conf_id = conf.GetProp('parent_conf_id')
                 if parent_conf_id == 'None':
                     parent_conf_id = None
-                sql = 'INSERT INTO res VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
+                sql = 'INSERT INTO mols VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
                 cur.execute(sql, (mol_id, conf_id, mol_block, matched_ids, visited_ids, matched_ids_count,
                                   visited_ids_count, parent_mol_id, parent_conf_id, 0, 0))
         conn.commit()
@@ -581,11 +581,11 @@ def update_db(db_fname, mol_id, nmols):
     with sqlite3.connect(db_fname) as conn:
         while mol_id is not None:
             cur = conn.cursor()
-            cur.execute('SELECT nmols FROM res WHERE mol_id = %i' % mol_id)
+            cur.execute('SELECT nmols FROM mols WHERE mol_id = %i' % mol_id)
             n = cur.fetchone()[0] + nmols
-            cur.execute('UPDATE res SET nmols = %i WHERE mol_id = %i' % (n, mol_id))
+            cur.execute('UPDATE mols SET nmols = %i WHERE mol_id = %i' % (n, mol_id))
             conn.commit()
-            cur.execute('SELECT parent_mol_id FROM res WHERE mol_id = %i' % mol_id)
+            cur.execute('SELECT parent_mol_id FROM mols WHERE mol_id = %i' % mol_id)
             mol_id = cur.fetchone()[0]
 
 
@@ -596,10 +596,10 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
 
         if search_deep:
             cur.execute("""SELECT mol_id, conf_id, mol_block, matched_ids, visited_ids 
-                           FROM res 
+                           FROM mols 
                            WHERE mol_id = (
                              SELECT mol_id
-                             FROM res
+                             FROM mols
                              WHERE visited_ids_count < %s AND used = 0
                              ORDER BY
                                visited_ids_count - matched_ids_count,
@@ -609,7 +609,7 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
                            )""" % max_features)
         else:
             cur.execute("""SELECT mol_id, conf_id, mol_block, matched_ids, visited_ids 
-                           FROM res 
+                           FROM mols 
                            WHERE mol_id = (
                              SELECT c.mol_id FROM (
                                SELECT DISTINCT 
@@ -617,8 +617,8 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
                                  a.matched_ids_count, 
                                  a.visited_ids_count, 
                                  ifnull(b.nmols, a.nmols) AS parent_nmols
-                               FROM (SELECT * FROM res WHERE visited_ids_count < %i AND used = 0) AS a
-                               LEFT JOIN res b ON b.mol_id = a.parent_mol_id
+                               FROM (SELECT * FROM mols WHERE visited_ids_count < %i AND used = 0) AS a
+                               LEFT JOIN mols b ON b.mol_id = a.parent_mol_id
                                ORDER BY
                                  a.visited_ids_count,
                                  a.visited_ids_count - a.matched_ids_count,
@@ -642,7 +642,7 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
             m.GetConformer().SetProp('matched_ids', matched_ids)
             mol.AddConformer(m.GetConformer(), assignId=False)
 
-        cur.execute('UPDATE res SET used = 1 WHERE mol_id = %i' % res[0][0])
+        cur.execute('UPDATE mols SET used = 1 WHERE mol_id = %i' % res[0][0])
         conn.commit()
 
         return mol
