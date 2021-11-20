@@ -390,7 +390,12 @@ def supply_screen(db, query_mol, rmsd):
     n = query_mol.GetNumAtoms()
     mol_names = db.get_mol_names()
     for mol_name in mol_names:
-        pharm_list = db.get_pharm(mol_name)[0]   # because there is only one stereoisomer for each entry
+        pharm_dict = db.get_pharm(mol_name)
+        try:
+            pharm_list = pharm_dict[0]   # because there is only one stereoisomer for each entry
+        except KeyError:
+            sys.stderr.write(f'{mol_name} does not have pharm_dict[0]\n')
+            continue
         yield mol_name, pharm_list, query_mol, n, rmsd
 
 
