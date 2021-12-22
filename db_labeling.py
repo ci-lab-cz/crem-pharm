@@ -40,6 +40,8 @@ def entry_point():
 
     pool = Pool(args.ncpu, initializer=init)
 
+    col_names = ['nA', 'nD', 'nH', 'nAr', 'nN', 'nP']
+
     with sqlite3.connect(args.input) as conn:
         cur = conn.cursor()
 
@@ -57,34 +59,47 @@ def entry_point():
 
         # create columns
         for table in tables:
-            for col_name in ['nA', 'nD', 'nH', 'nAr', 'nN', 'nP']:
+            for col_name in col_names:
                 try:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} INTEGER DEFAULT 0")
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} INTEGER DEFAULT NULL")
                 except sqlite3.OperationalError as e:
                     sys.stderr.write(str(e) + '\n')
             conn.commit()
 
         if frags_table:
 
-            cur.execute(f"SELECT core_id, core_smi FROM frags")
+            cur.execute(f"SELECT core_id, core_smi FROM frags WHERE" +
+                        " AND ".join([f"{col} IS NULL" for col in col_names]))
             res = cur.fetchall()
             for i, (core_id, upd_str) in enumerate(pool.imap_unordered(calc, res), 1):
                 cur.execute(f"UPDATE frags SET {upd_str} WHERE core_id = {core_id}")
-                if args.verbose and i % 10000 == 0:
-                    sys.stderr.write(f'\r{i} fragments processed')
+                if i % 10000 == 0:
+                    conn.commit()
+                    if args.verbose:
+                        sys.stderr.write(f'\r{i} fragments processed')
             conn.commit()
 
         else:
 
             for table in tables:
-                sys.stderr.write('\n')
-                cur.execute(f"SELECT rowid, core_smi FROM {table}")
+                sys.stderr.write(f'\nTable {table}\n')
+                cur.execute(f"SELECT rowid, core_smi FROM {table} WHERE" +
+                            " AND ".join([f"{col} IS NULL" for col in col_names]))
                 res = cur.fetchall()
                 for i, (rowid, upd_str) in enumerate(pool.imap_unordered(calc, res), 1):
                     cur.execute(f"UPDATE {table} SET {upd_str} WHERE rowid = '{rowid}'")
-                    if args.verbose and i % 10000 == 0:
-                        sys.stderr.write(f'\r{i} fragments processed')
+                    if i % 10000 == 0:
+                        conn.commit()
+                        if args.verbose:
+                            sys.stderr.write(f'\r{i} fragments processed')
                 conn.commit()
+
+        for table in tables:
+            for col_name in col_names:
+                cur.execute(f'UPDATE {table} SET {col_name} = 0 WHERE {col_name} IS NULL')
+            conn.commit()
+
+    sys.stderr.write(f'\nFinished processing of {args.input}\n')
 
 
 if __name__ == '__main__':
