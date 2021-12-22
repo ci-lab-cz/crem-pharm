@@ -68,7 +68,7 @@ def entry_point():
 
         if frags_table:
 
-            cur.execute(f"SELECT core_id, core_smi FROM frags WHERE" +
+            cur.execute(f"SELECT core_id, core_smi FROM frags WHERE " +
                         " AND ".join([f"{col} IS NULL" for col in col_names]))
             res = cur.fetchall()
             for i, (core_id, upd_str) in enumerate(pool.imap_unordered(calc, res), 1):
@@ -83,7 +83,7 @@ def entry_point():
 
             for table in tables:
                 sys.stderr.write(f'\nTable {table}\n')
-                cur.execute(f"SELECT rowid, core_smi FROM {table} WHERE" +
+                cur.execute(f"SELECT rowid, core_smi FROM {table} WHERE " +
                             " AND ".join([f"{col} IS NULL" for col in col_names]))
                 res = cur.fetchall()
                 for i, (rowid, upd_str) in enumerate(pool.imap_unordered(calc, res), 1):
