@@ -113,6 +113,10 @@ def main():
         cur.executemany("INSERT INTO hashes(id, hash) VALUES(?, ?)", [(smi_id, h)for h in hashes])
         con.commit()
 
+    sql = "CREATE INDEX hashes_hash_idx ON hashes(hash)"
+    con.execute(sql)
+    con.commit()
+
 
 if __name__ == '__main__':
     main()
