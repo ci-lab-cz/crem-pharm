@@ -23,7 +23,8 @@ def create_db(fname):
                 "smi TEXT NOT NULL UNIQUE)")
     con.execute("CREATE TABLE IF NOT EXISTS hashes("
                 "id INTEGER NOT NULL, "
-                "hash TEXT NOT NULL)")
+                "hash TEXT NOT NULL, "
+                "FOREIGN KEY (id) REFERENCES frags (id))")
     con.commit()
     con.close()
 
