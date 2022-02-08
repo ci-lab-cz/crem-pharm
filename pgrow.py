@@ -779,6 +779,59 @@ def get_features(p, pids, add_features):
         return dict()
 
 
+def filter_by_hashes(row_ids, cur, radius, db_hashes, hashes):
+    """
+
+    :param row_ids: selected row_ids which should be filtered (necessary parameter)
+    :param cur: SQLite cursor object of CReM DB (necessary parameter)
+    :param radius: radius in CReM DB (necessary parameter)
+    :param db_hashes: file name of DB of 3D pharmacophore hashes
+    :param hashes: list of 3D pharmacophore hashes to keep fragments
+    :return:
+    """
+
+    if not row_ids:
+        return []
+    batch_size = 32000
+    row_ids = list(row_ids)
+    smis = defaultdict(list)
+    for start in range(0, len(row_ids), batch_size):
+        batch = row_ids[start:start + batch_size]
+        sql = f"SELECT rowid, core_smi FROM radius{radius} WHERE rowid IN ({','.join('?' * len(batch))})"
+        for i, smi in cur.execute(sql, batch).fetchall():
+            smis[smi].append(i)
+
+    con = sqlite3.connect(db_hashes)
+    sql = f"SELECT DISTINCT(frags.smi) FROM frags, hashes WHERE frags.id == hashes.id AND hashes.hash IN ({','.join('?' * len(hashes))})"
+    res = [item[0] for item in con.execute(sql, list(hashes)).fetchall()]
+
+    output_row_ids = []
+    for smi in res:
+        output_row_ids.extend(smis[smi])
+    return output_row_ids
+
+
+def enumerate_hashes(att_positions, feature_positions, bin_step, max_features=5):
+    output_hashes = set()
+    for pos in att_positions:
+        p = P(cached=True, bin_step=bin_step)
+        p.load_from_feature_coords(feature_positions + [('T', tuple(pos))])
+        # feature_ids = p.get_feature_ids()
+        # att_id = feature_ids['T'][0]
+        # other_ids = []
+        # for k, v in feature_ids.items():
+        #     if k != 'T':
+        #         other_ids.extend(v)
+        # max_features = min(max_features, len(other_ids))
+        # hashes = []
+        # for n in range(1, max_features + 1):
+        #     for comb in combinations(other_ids, n):
+        #         hashes.append(p.get_signature_md5(ids=[att_id] + list(comb)))
+        # output_hashes.update(hashes)
+        output_hashes.add(p.get_signature_md5())
+    return output_hashes
+
+
 def main():
     parser = argparse.ArgumentParser(description='Grow structures to fit query pharmacophore.')
     parser.add_argument('-q', '--query', metavar='FILENAME', required=True,
@@ -810,6 +863,10 @@ def main():
                         help='radius of exclusion volumes (distance to heavy atoms). By default exclusion volumes are '
                              'disabled even if they are present in a query pharmacophore. To enable them set '
                              'a positive numeric value.')
+    parser.add_argument('--hash_db', metavar='FILENAME', required=False, default=None,
+                        help='database with 3D pharmacophore hashes for additional filtering of fragments for growing.')
+    parser.add_argument('--hash_db_bin_step', metavar='NUMERIC', required=False, default=1.5,
+                        help='bin step used to create 3D pharmacophore hashes.')
     parser.add_argument('-u', '--hostfile', metavar='FILENAME', required=False, type=str, default=None,
                         help='text file with addresses of nodes of dask SSH cluster. The most typical, it can be '
                              'passed as $PBS_NODEFILE variable from inside a PBS script. The first line in this file '
@@ -889,9 +946,21 @@ def main():
         new_pids = p.select_nearest_cluster(tuple(map(int, mol.GetProp('visited_ids').split(','))))
         atom_ids = get_grow_atom_ids(mol, p.get_xyz(new_pids))
         kwargs = get_features(p, new_pids, args.additional_features)
+
+        # create additional constrains for selection of fragments which will be attached during growing
+        __max_features = 5   # max number of enumerated feature combinations in 3D pharm hash db
+        use_hash_db = args.hash_db is not None and len(new_pids) <= __max_features
+        hashes = []
+        if use_hash_db:
+            att_positions = mol.GetConformer().GetPositions()[atom_ids]
+            feature_positions = p.get_feature_coords(new_pids)
+            hashes = enumerate_hashes(att_positions=att_positions, feature_positions=feature_positions,
+                                      bin_step=args.hash_db_bin_step, max_features=__max_features)
+
         new_mols = list(grow_mol(mol, args.db, radius=3, min_atoms=1, max_atoms=12,
-                                 max_replacements=None, replace_ids=atom_ids, return_mol=True,
-                                 ncores=args.ncpu, **kwargs))
+                                 max_replacements=None, replace_ids=atom_ids, return_mol=True, ncores=args.ncpu,
+                                 filter_func=partial(filter_by_hashes, db_hashes=args.hash_db, hashes=hashes) if use_hash_db else None,
+                                 **kwargs))
 
         print(f'mol grow: {len(new_mols)} mols, {round(time.perf_counter() - start, 4)}')
         sys.stdout.flush()
