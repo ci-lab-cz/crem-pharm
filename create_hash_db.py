@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 import sqlite3
 from functools import partial
 from itertools import combinations
@@ -30,11 +31,13 @@ def create_db(fname):
     con.close()
 
 
-def read_smi(fname):
-    with open(fname) as f:
-        for line in f:
-            smi = line.strip().split()[0]
-            yield smi
+def read_smi(fname, dbname):
+    with sqlite3.connect(dbname) as con:
+        with open(fname) as f:
+            for line in f:
+                smi = line.strip().split()[0]
+                if not con.execute("SELECT EXISTS(SELECT 1 FROM frags WHERE smi = ?)", (smi, )).fetchone()[0]:
+                    yield smi
 
 
 def process_smi(smi, nconf, seed, binstep, min_features, max_features, directed):
@@ -138,7 +141,9 @@ def main():
 
     pool = Pool(args.ncpu)
 
-    create_db(args.output)
+    if not os.path.isfile(args.output):
+        create_db(args.output)
+
     con = sqlite3.connect(args.output)
     cur = con.cursor()
 
@@ -149,7 +154,7 @@ def main():
                                                                   min_features=1,
                                                                   max_features=5,
                                                                   directed=args.directed),
-                                                          read_smi(args.input)), 1):
+                                                          read_smi(args.input, args.output)), 1):
         smi_id = list(cur.execute("INSERT OR IGNORE INTO frags(smi) VALUES(?) RETURNING id", (smi, )))[0][0]
         cur.executemany("INSERT INTO hashes(id, hash) VALUES(?, ?)", [(smi_id, h)for h in hashes])
         con.commit()
