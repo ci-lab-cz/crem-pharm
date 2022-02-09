@@ -6,6 +6,7 @@ from functools import partial
 from itertools import combinations
 from multiprocessing import Pool
 
+import numpy as np
 from pmapper.pharmacophore import Pharmacophore as P
 from pmapper.customize import load_smarts
 from rdkit import Chem
@@ -36,9 +37,9 @@ def read_smi(fname):
             yield smi
 
 
-def process_smi(smi, nconf, seed, binstep, min_features, max_features):
+def process_smi(smi, nconf, seed, binstep, min_features, max_features, directed):
     mol = gen_confs(mol=Chem.MolFromSmiles(smi), nconf=nconf, seed=seed)
-    hashes = gen_hashes(mol=mol, binstep=binstep, min_features=min_features, max_features=max_features)
+    hashes = gen_hashes(mol=mol, binstep=binstep, min_features=min_features, max_features=max_features, directed=directed)
     return smi, hashes
 
 
@@ -48,43 +49,82 @@ def gen_confs(mol, nconf, seed):
     return mol
 
 
-def gen_hashes(mol, binstep, min_features, max_features):
+def get_complementary_point_xyz(mol, conf_id, start_atom_id, binstep):
     """
-    Attachment point feature will be always present in output combination. Thus, min_features is the minimum number of
-    added other features
-
+    Find coordinates of a point on a distance of a bin step in the direction of the neighboring atom to
+    the attachment point.
     :param mol:
+    :param conf_id:
+    :param start_atom_id: id of the attachment point (atom with atomic number 0)
+    :param binstep:
+    :return: tuple of xyz coordinates
+    """
+    end_atom_id = mol.GetAtomWithIdx(start_atom_id).GetNeighbors()[0].GetIdx()
+    conf = mol.GetConformer(conf_id)
+    a = conf.GetAtomPosition(start_atom_id)
+    b = conf.GetAtomPosition(end_atom_id)
+    output_pos = a + (b - a) / np.linalg.norm(a - b) * binstep
+    return tuple(output_pos)
+
+
+def gen_hashes(mol, binstep, min_features, max_features, directed):
+    """
+    Attachment point features will be always present in output combination. Thus, min_features is the minimum number of
+    added other features, max_features is correspondingly the maximum number of other features.
+    Attachment point is represented by two features to simulate its direction. Feature of the attachment point itself is
+    encoded by label T, feature designating the end of the attachment point is labeled Q.
+
+    :param mol: multi-conformer Mol
     :param binstep:
     :param min_features:
     :param max_features:
+    :param directed: False if attachment point is encoded by undirected feature and True if it should be encoded
+                     by a directed feature (a combination of starting and ending features)
     :return:
     """
     hashes = []
     p = P(cached=True, bin_step=binstep)
     atom_ids = p._get_features_atom_ids(mol, smarts)
+
     for conf in mol.GetConformers():
-        p.load_from_atom_ids(mol, atom_ids, conf.GetId())
+
+        conf_id = conf.GetId()
+        p.load_from_atom_ids(mol, atom_ids, conf_id)
+
         feature_ids = p.get_feature_ids()
         att_id = feature_ids['T'][0]
         other_ids = []
         for k, v in feature_ids.items():
             if k != 'T':
                 other_ids.extend(v)
+
+        if directed:
+            # determine coordinates of the end of the attachment point feature and add it to pharmacophore
+            end_xyz = get_complementary_point_xyz(mol, conf_id, att_id, binstep)
+            end_id = p.add_feature('Q', end_xyz)
+            fixed_ids = [att_id, end_id]
+        else:
+            fixed_ids = [att_id]
+
         max_features = min(max_features, len(other_ids))
         for n in range(min_features, max_features + 1):
             for comb in combinations(other_ids, n):
-                hashes.append(p.get_signature_md5(ids=[att_id] + list(comb)))
-    return set(hashes)
+                hashes.append(p.get_signature_md5(ids=fixed_ids + list(comb)))
+
+    return tuple(set(hashes))
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate database of 3D pharmacophore hashes of fragments.')
+    parser = argparse.ArgumentParser(description='Generate database of 3D pharmacophore hashes of fragments having '
+                                                 'one attachemnt point.')
     parser.add_argument('-i', '--input', metavar='FILENAME', required=True,
                         help='SMILES files. No header.')
     parser.add_argument('-o', '--output', metavar='FILENAME', required=True,
                         help='SQLite3 DB file.')
     parser.add_argument('-b', '--binstep', metavar='NUMERIC', required=False, type=float, default=1.5,
                         help='binning step to generate 3D pharmacophore hashes.')
+    parser.add_argument('-d', '--directed', required=False, action='store_true', default=False,
+                        help='if set attachment points will be considered as directed features.')
     parser.add_argument('-n', '--nconf', metavar='INTEGER', required=False, type=int, default=50,
                         help='number of conformers generated for each input fragment.')
     parser.add_argument('-s', '--seed', metavar='INTEGER', required=False, type=int, default=0,
@@ -107,7 +147,8 @@ def main():
                                                                   seed=args.seed,
                                                                   binstep=args.binstep,
                                                                   min_features=1,
-                                                                  max_features=5),
+                                                                  max_features=5,
+                                                                  directed=args.directed),
                                                           read_smi(args.input)), 1):
         smi_id = list(cur.execute("INSERT OR IGNORE INTO frags(smi) VALUES(?) RETURNING id", (smi, )))[0][0]
         cur.executemany("INSERT INTO hashes(id, hash) VALUES(?, ?)", [(smi_id, h)for h in hashes])
