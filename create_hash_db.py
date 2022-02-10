@@ -119,7 +119,7 @@ def gen_hashes(mol, binstep, min_features, max_features, directed):
 
 def main():
     parser = argparse.ArgumentParser(description='Generate database of 3D pharmacophore hashes of fragments having '
-                                                 'one attachemnt point.')
+                                                 'one attachment point.')
     parser.add_argument('-i', '--input', metavar='FILENAME', required=True,
                         help='SMILES files. No header.')
     parser.add_argument('-o', '--output', metavar='FILENAME', required=True,
