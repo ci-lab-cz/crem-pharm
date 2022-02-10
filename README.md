@@ -3,3 +3,12 @@ This version supports additional filtering of growing fragments by pre-compiled 
 Requires the corresponding version of crem module, which supports filter_func argument.
 
 By default the program should work as previously.  
+
+
+#####Installation of modules required for running program supporting additional filtering of fragments by 3D hashes
+
+```
+pip uninstall pmapper crem
+pip install git+https://github.com/DrrDom/pmapper.git
+pip install git+https://github.com/DrrDom/crem.git@filter_func
+```
