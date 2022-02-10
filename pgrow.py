@@ -832,6 +832,32 @@ def enumerate_hashes(att_positions, feature_positions, bin_step, max_features=5)
     return output_hashes
 
 
+def enumerate_hashes_directed(mol, att_ids, feature_positions, bin_step, directed):
+
+    output_hashes = set()
+
+    for conf in mol.GetConformers():
+        for att_id in att_ids:
+            t_pos = conf.GetAtomPosition(att_id)
+
+            if directed:
+                for end_atom in mol.GetAtomWithIdx(att_id).GetNeighbors():
+                    if end_atom.GetAtomicNum() == 1:
+                        end_atom_id = end_atom.GetIdx()
+                        h_pos = conf.GetAtomPosition(end_atom_id)
+                        q_pos = t_pos + (h_pos - t_pos) / np.linalg.norm(t_pos - h_pos) * bin_step
+                        p = P(cached=True, bin_step=bin_step)
+                        p.load_from_feature_coords(feature_positions + [('T', tuple(t_pos)), ('Q', tuple(q_pos))])
+                        output_hashes.add(p.get_signature_md5())
+
+            else:
+                p = P(cached=True, bin_step=bin_step)
+                p.load_from_feature_coords(feature_positions + [('T', tuple(t_pos))])
+                output_hashes.add(p.get_signature_md5())
+
+    return output_hashes
+
+
 def main():
     parser = argparse.ArgumentParser(description='Grow structures to fit query pharmacophore.')
     parser.add_argument('-q', '--query', metavar='FILENAME', required=True,
@@ -865,8 +891,11 @@ def main():
                              'a positive numeric value.')
     parser.add_argument('--hash_db', metavar='FILENAME', required=False, default=None,
                         help='database with 3D pharmacophore hashes for additional filtering of fragments for growing.')
-    parser.add_argument('--hash_db_bin_step', metavar='NUMERIC', required=False, default=1.5,
+    parser.add_argument('--hash_db_bin_step', metavar='NUMERIC', required=False, default=1.5, type=float,
                         help='bin step used to create 3D pharmacophore hashes.')
+    parser.add_argument('--hash_db_directed', required=False, default=False, action='store_true',
+                        help='if set direction of attachment points will be considered during calculation of '
+                             '3D pharmacophore hashes.')
     parser.add_argument('-u', '--hostfile', metavar='FILENAME', required=False, type=str, default=None,
                         help='text file with addresses of nodes of dask SSH cluster. The most typical, it can be '
                              'passed as $PBS_NODEFILE variable from inside a PBS script. The first line in this file '
@@ -952,10 +981,9 @@ def main():
         use_hash_db = args.hash_db is not None and len(new_pids) <= __max_features
         hashes = []
         if use_hash_db:
-            att_positions = mol.GetConformer().GetPositions()[atom_ids]
             feature_positions = p.get_feature_coords(new_pids)
-            hashes = enumerate_hashes(att_positions=att_positions, feature_positions=feature_positions,
-                                      bin_step=args.hash_db_bin_step, max_features=__max_features)
+            hashes = enumerate_hashes_directed(mol=mol, att_ids=atom_ids, feature_positions=feature_positions,
+                                               bin_step=args.hash_db_bin_step, directed=args.hash_db_directed)
 
         new_mols = list(grow_mol(mol, args.db, radius=3, min_atoms=1, max_atoms=12,
                                  max_replacements=None, replace_ids=atom_ids, return_mol=True, ncores=args.ncpu,
