@@ -874,6 +874,11 @@ def main():
                         help='file with initial fragments - DB in pmapper format.')
     parser.add_argument('-d', '--db', metavar='FILENAME', required=True,
                         help='database with interchangeable fragments.')
+    parser.add_argument('-r', '--radius', metavar='INTEGER', type=int, choices=[1, 2, 3, 4, 5], default=3,
+                        help='radius of a context of attached fragments.')
+    parser.add_argument('--max_replacements', metavar='INTEGER', type=int, default=None,
+                        help='maximum number of fragments considered for growing. By default all fragments are '
+                             'considered, that may cause combinatorial explosion in some cases.')
     parser.add_argument('-x', '--additional_features', action='store_true', default=False,
                         help='indicate if the fragment database contains pharmacophore features to be used for '
                              'fragment selection.')
@@ -985,8 +990,9 @@ def main():
             hashes = enumerate_hashes_directed(mol=mol, att_ids=atom_ids, feature_positions=feature_positions,
                                                bin_step=args.hash_db_bin_step, directed=args.hash_db_directed)
 
-        new_mols = list(grow_mol(mol, args.db, radius=3, min_atoms=1, max_atoms=12,
-                                 max_replacements=None, replace_ids=atom_ids, return_mol=True, ncores=args.ncpu,
+        new_mols = list(grow_mol(mol, args.db, radius=args.radius, min_atoms=1, max_atoms=12,
+                                 max_replacements=args.max_replacements, replace_ids=atom_ids, return_mol=True,
+                                 ncores=args.ncpu,
                                  filter_func=partial(filter_by_hashes, db_hashes=args.hash_db, hashes=hashes) if use_hash_db else None,
                                  **kwargs))
 
