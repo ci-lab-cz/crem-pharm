@@ -3,6 +3,7 @@
 import argparse
 import os
 import sqlite3
+import sys
 from functools import partial
 from itertools import combinations
 from multiprocessing import Pool
@@ -62,11 +63,15 @@ def get_complementary_point_xyz(mol, conf_id, start_atom_id, binstep):
     :param binstep:
     :return: tuple of xyz coordinates
     """
-    end_atom_id = mol.GetAtomWithIdx(start_atom_id).GetNeighbors()[0].GetIdx()
-    conf = mol.GetConformer(conf_id)
-    a = conf.GetAtomPosition(start_atom_id)
-    b = conf.GetAtomPosition(end_atom_id)
-    output_pos = a + (b - a) / np.linalg.norm(a - b) * binstep
+    try:
+        end_atom_id = mol.GetAtomWithIdx(start_atom_id).GetNeighbors()[0].GetIdx()
+        conf = mol.GetConformer(conf_id)
+        a = conf.GetAtomPosition(start_atom_id)
+        b = conf.GetAtomPosition(end_atom_id)
+        output_pos = a + (b - a) / np.linalg.norm(a - b) * binstep
+    except Exception as e:
+        sys.stderr.write(Chem.MolToSmiles(mol) + '\n' + str(e))
+        return tuple()
     return tuple(output_pos)
 
 
@@ -104,6 +109,8 @@ def gen_hashes(mol, binstep, min_features, max_features, directed):
         if directed:
             # determine coordinates of the end of the attachment point feature and add it to pharmacophore
             end_xyz = get_complementary_point_xyz(mol, conf_id, att_id, binstep)
+            if not end_xyz:
+                continue
             end_id = p.add_feature('Q', end_xyz)
             fixed_ids = [att_id, end_id]
         else:
@@ -119,7 +126,7 @@ def gen_hashes(mol, binstep, min_features, max_features, directed):
 
 def main():
     parser = argparse.ArgumentParser(description='Generate database of 3D pharmacophore hashes of fragments having '
-                                                 'one attachment point.')
+                                                 'one attachemnt point.')
     parser.add_argument('-i', '--input', metavar='FILENAME', required=True,
                         help='SMILES files. No header.')
     parser.add_argument('-o', '--output', metavar='FILENAME', required=True,
