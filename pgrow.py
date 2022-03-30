@@ -567,7 +567,7 @@ def save_res(mols, db_fname, parent_mol_id=None):
         for mol in mols:
             mol_id += 1
             mol.SetProp('_Name', str(mol_id))
-            for conf_id, conf in enumerate(mol.GetConformers()):
+            for conf in mol.GetConformers():
                 mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
                 visited_ids = conf.GetProp('visited_ids')
                 visited_ids_count = visited_ids.count(',') + 1
@@ -577,7 +577,7 @@ def save_res(mols, db_fname, parent_mol_id=None):
                 if parent_conf_id == 'None':
                     parent_conf_id = None
                 sql = 'INSERT INTO mols VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
-                cur.execute(sql, (mol_id, conf_id, mol_block, matched_ids, visited_ids, matched_ids_count,
+                cur.execute(sql, (mol_id, conf.GetId(), mol_block, matched_ids, visited_ids, matched_ids_count,
                                   visited_ids_count, parent_mol_id, parent_conf_id, 0, 0))
         conn.commit()
 
@@ -600,37 +600,37 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
         cur = conn.cursor()
 
         if search_deep:
-            cur.execute("""SELECT id, conf_id, mol_block, matched_ids, visited_ids 
-                           FROM mols 
-                           WHERE id = (
-                             SELECT id
-                             FROM mols
-                             WHERE visited_ids_count < %s AND used = 0
-                             ORDER BY
-                               visited_ids_count - matched_ids_count,
-                               matched_ids_count DESC,
-                               rowid DESC
-                             LIMIT 1
-                           )""" % max_features)
+            cur.execute(f"""SELECT id, conf_id, mol_block, matched_ids, visited_ids 
+                            FROM mols 
+                            WHERE id = (
+                              SELECT id
+                              FROM mols
+                              WHERE visited_ids_count < {max_features} AND used = 0
+                              ORDER BY
+                                visited_ids_count - matched_ids_count,
+                                matched_ids_count DESC,
+                                rowid DESC
+                              LIMIT 1
+                            )""")
         else:
-            cur.execute("""SELECT id, conf_id, mol_block, matched_ids, visited_ids 
-                           FROM mols 
-                           WHERE id = (
-                             SELECT c.id FROM (
-                               SELECT DISTINCT 
-                                 a.id, 
-                                 a.matched_ids_count, 
-                                 a.visited_ids_count, 
-                                 ifnull(b.nmols, a.nmols) AS parent_nmols
-                               FROM (SELECT * FROM mols WHERE visited_ids_count < %i AND used = 0) AS a
-                               LEFT JOIN mols b ON b.id = a.parent_mol_id
-                               ORDER BY
-                                 a.visited_ids_count,
-                                 a.visited_ids_count - a.matched_ids_count,
-                                 parent_nmols
-                               LIMIT 1
-                             ) AS c
-                           )""" % max_features)
+            cur.execute(f"""SELECT id, conf_id, mol_block, matched_ids, visited_ids 
+                            FROM mols 
+                            WHERE id = (
+                              SELECT c.id FROM (
+                                SELECT DISTINCT 
+                                  a.id, 
+                                  a.matched_ids_count, 
+                                  a.visited_ids_count, 
+                                  ifnull(b.nmols, a.nmols) AS parent_nmols
+                                FROM (SELECT * FROM mols WHERE visited_ids_count < {max_features} AND used = 0) AS a
+                                LEFT JOIN mols b ON b.id = a.parent_mol_id
+                                ORDER BY
+                                  a.visited_ids_count,
+                                  a.visited_ids_count - a.matched_ids_count,
+                                  parent_nmols
+                                LIMIT 1
+                              ) AS c
+                            )""")
 
         res = cur.fetchall()
         if not res:
@@ -1008,8 +1008,8 @@ def main():
         sys.stdout.flush()
         start2 = time.perf_counter()
 
-        new_mols = defaultdict(list)
-        inputs = [(new_isomer, conf.GetId()) for conf in mol.GetConformers() for new_isomer in new_isomers]
+        new_mols = defaultdict(list)   # {parent_conf_id_1: [mol1, mol2, ...], ... }
+        inputs = [(new_isomer, conf.GetId()) for new_isomer, conf in product(new_isomers, mol.GetConformers())]
 
         if args.hostfile is not None:
             b = bag.from_sequence(inputs, npartitions=args.num_workers * 2)
