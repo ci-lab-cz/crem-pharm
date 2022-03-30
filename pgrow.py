@@ -539,7 +539,7 @@ def merge_confs(mols_dict):
         for mol in mols:
             visited_ids = mol.GetProp('visited_ids')
             for c in mol.GetConformers():
-                c.SetProp('parent_conf_id', str(parent_conf_id))
+                # c.SetProp('parent_conf_id', str(parent_conf_id))
                 c.SetProp('visited_ids', visited_ids)
             smi = Chem.MolToSmiles(mol, isomericSmiles=True)
             if smi not in smiles:
@@ -762,6 +762,8 @@ def get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_
         return template_conf_id, None
 
     mol.SetProp('visited_ids', template_mol.GetProp('visited_ids') + ',' + ','.join(map(str, new_pids)))
+    for conf in mol.GetConformers():
+        conf.SetProp('parent_conf_id', str(template_conf_id))
     return template_conf_id, mol
 
 
