@@ -498,9 +498,10 @@ def select_mols(mols):
     deleted = np.zeros(hacs.shape)
 
     for i, (mol, hac, ring_ids) in enumerate(mols):
-        for j in np.where(np.logical_and(hacs <= hac, deleted == 0))[0]:
-            if i != j and check_substr_mols(mols[j][0], mol, ring_ids):
-                deleted[i] = 1
+        mol_ids = np.where(np.logical_and(hacs >= hac, deleted == 0))[0]
+        mol_ids = np.delete(mol_ids, np.argwhere(mol_ids == i))
+        remove_ids = [j for j in mol_ids if check_substr_mols(mol, mols[j][0], mols[j][2])]
+        deleted[remove_ids] = 1
 
     return [mols[i][0] for i in np.where(deleted == 0)[0]]
 
