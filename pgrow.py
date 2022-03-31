@@ -463,17 +463,22 @@ def fused_ring_atoms(m):
     return rings
 
 
-def check_substr_mols(small, large):
-    small = Chem.RemoveHs(small)
-    large = Chem.RemoveHs(large)
-    large_ring_ids = fused_ring_atoms(large)
+def check_substr_mols(small, large, large_ring_ids):
+    """
+
+    :param small: smaller mol
+    :param large: larger mol
+    :param large_ring_ids: list of sets with ids of ring systems of a larger mol
+    :return:
+    """
     small_nrings = rdMolDescriptors.CalcNumRings(small)
     if small_nrings == 0:
         return large.HasSubstructMatch(small)
     else:
         for ids in large.GetSubstructMatches(small):
+            ids = set(ids)
             for r_ids in large_ring_ids:
-                if set(ids).intersection(r_ids) == set(r_ids):
+                if r_ids.issubset(ids):
                     return True
         return False
 
@@ -487,13 +492,14 @@ def select_mols(mols):
     :return:
     """
     mols = [(Chem.RemoveHs(mol), mol.GetNumHeavyAtoms()) for mol in mols]
+    mols = [(mol, hac, fused_ring_atoms(mol)) for mol, hac in mols]   # mol, hac, list of sets with ids of ring systems required for substructure check
     mols = sorted(mols, key=itemgetter(1))
     hacs = np.array([item[1] for item in mols])
     deleted = np.zeros(hacs.shape)
 
-    for i, (mol, hac) in enumerate(mols):
+    for i, (mol, hac, ring_ids) in enumerate(mols):
         for j in np.where(np.logical_and(hacs <= hac, deleted == 0))[0]:
-            if i != j and check_substr_mols(mols[j][0], mol):
+            if i != j and check_substr_mols(mols[j][0], mol, ring_ids):
                 deleted[i] = 1
 
     return [mols[i][0] for i in np.where(deleted == 0)[0]]
