@@ -23,6 +23,9 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolDescriptors
 # from rdkit.Chem.AllChem import AlignMol, EmbedMultipleConfs
 # from rdkit.Chem.rdForceFieldHelpers import UFFGetMoleculeForceField
+from rdkit.Chem.Crippen import MolLogP
+from rdkit.Chem.Descriptors import MolWt
+from rdkit.Chem.rdMolDescriptors import CalcNumRotatableBonds, CalcTPSA
 from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
 from rdkit.Geometry.rdGeometry import Point3D
 from crem.crem import grow_mol
@@ -799,6 +802,37 @@ def get_features(p, pids, add_features):
         return dict()
 
 
+def get_property_restrictions(mol, max_mw, max_tpsa, max_rtb, max_logp):
+    mw = max_mw - MolWt(mol)
+    tpsa = max_tpsa - CalcTPSA(mol)
+    rtb = max_rtb - CalcNumRotatableBonds(mol) - 1  # it is necessary to take into account the formation of bonds during the growth of the molecule
+    if rtb == -1:
+        rtb = 0
+    logp = max_logp - MolLogP(mol) + 0.5
+    return {'mw': (1, mw), 'tpsa': (0, tpsa), 'rtb': (0, rtb), 'logp': (-100, logp)}
+
+
+def remove_mols_by_property(mols, max_mw, max_tpsa, max_rtb, max_logp):
+    """
+
+    :param mols: list of 2-tuple (smi, mol)
+    :param max_mw:
+    :param max_tpsa:
+    :param max_rtb:
+    :param max_logp:
+    :return:
+    """
+    output = []
+    for smi, mol in mols:
+        if MolWt(mol) > max_mw or \
+                CalcTPSA(mol) > max_tpsa or \
+                CalcNumRotatableBonds(mol) > max_rtb or \
+                MolLogP(mol) > max_logp:
+            continue
+        output.append((smi, mol))
+    return output
+
+
 def filter_by_hashes(row_ids, cur, radius, db_hashes, hashes):
     """
 
@@ -914,6 +948,14 @@ def main():
                         help='radius of exclusion volumes (distance to heavy atoms). By default exclusion volumes are '
                              'disabled even if they are present in a query pharmacophore. To enable them set '
                              'a positive numeric value.')
+    parser.add_argument('--mw', metavar='NUMERIC', required=False, type=float, default=450,
+                        help='Maximum molecular weight of generated compounds. Default: 450.')
+    parser.add_argument('--tpsa', metavar='NUMERIC', required=False, type=float, default=120,
+                        help='Maximum TPSA of generated compounds. Default: 120.')
+    parser.add_argument('--rtb', metavar='NUMERIC', required=False, type=float, default=7,
+                        help='Maximum number of rotatable bonds in generated compounds. Default: 7.')
+    parser.add_argument('--logp', metavar='NUMERIC', required=False, type=float, default=4,
+                        help='Maximum logP of generated compounds. Default: 4.')
     parser.add_argument('--hash_db', metavar='FILENAME', required=False, default=None,
                         help='database with 3D pharmacophore hashes for additional filtering of fragments for growing.')
     parser.add_argument('--hash_db_bin_step', metavar='NUMERIC', required=False, default=1.5, type=float,
@@ -1000,6 +1042,7 @@ def main():
         new_pids = p.select_nearest_cluster(tuple(map(int, mol.GetProp('visited_ids').split(','))))
         atom_ids = get_grow_atom_ids(mol, p.get_xyz(new_pids))
         kwargs = get_features(p, new_pids, args.additional_features)
+        kwargs = {**kwargs, **get_property_restrictions(mol, max_mw=args.mw, max_tpsa=args.tpsa, max_rtb=args.rtb, max_logp=args.logp)}
 
         # create additional constrains for selection of fragments which will be attached during growing
         __max_features = 5   # max number of enumerated feature combinations in 3D pharm hash db
@@ -1015,6 +1058,7 @@ def main():
                                  ncores=args.ncpu,
                                  filter_func=partial(filter_by_hashes, db_hashes=args.hash_db, hashes=hashes) if use_hash_db else None,
                                  **kwargs))
+        new_mols = remove_mols_by_property(new_mols, max_mw=args.mw, max_tpsa=args.tpsa, max_rtb=args.rtb, max_logp=args.logp)
 
         print(f'mol grow: {len(new_mols)} mols, {round(time.perf_counter() - start, 4)}')
         sys.stdout.flush()
