@@ -32,7 +32,7 @@ def create_db(fname):
 
 def read_smi(fname, dbname):
     with sqlite3.connect(dbname) as con:
-        for mol, title in read_input(fname):
+        for mol, title in read_input(fname, sdf_confs=fname.endswith('.sdf')):
             if not con.execute("SELECT EXISTS(SELECT 1 FROM frags WHERE smi = ?)", (title, )).fetchone()[0]:
                 yield mol
 
@@ -80,10 +80,10 @@ def main():
     parser = argparse.ArgumentParser(description='Generate database of 3D pharmacophore hashes of fragments having '
                                                  'one attachment point.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('-i', '--input', metavar='FILENAME', required=True,
-                        help='SMILES files. No header.')
+                        help='SMILES files (no header) or SDF (may contain multiple conformers going consecutively).')
     parser.add_argument('-o', '--output', metavar='FILENAME', required=True,
                         help='SQLite3 DB file.')
-    parser.add_argument('-b', '--binstep', metavar='NUMERIC', required=False, type=float, default=1.5,
+    parser.add_argument('-b', '--binstep', metavar='NUMERIC', required=False, type=float, default=1,
                         help='binning step to generate 3D pharmacophore hashes.')
     parser.add_argument('-tol', '--tolerance', metavar='NUMERIC', type=int, default=0,
                         help='tolerance used for calculation of a stereoconfiguration sign')
