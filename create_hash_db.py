@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 
 import argparse
-import os
 import sqlite3
 from functools import partial
-from itertools import combinations
+from itertools import combinations, chain
 from multiprocessing import Pool
+from os import path
 
 from pmapper.utils import load_multi_conf_mol
-from pmapper.utils import load_smarts
+from pmapper.customize import load_smarts
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from read_input import read_input
 
-smarts = load_smarts()
+smarts = load_smarts(path.join(path.dirname(path.realpath(__file__)), 'smarts_features.txt'))
+# smarts['T'] = ((Chem.MolFromSmarts('[50F]')), )
 
 
 def create_db(fname):
@@ -37,8 +38,8 @@ def read_smi(fname, dbname):
                 yield mol
 
 
-def process_smi(mol, nconf, seed, binstep, tolerance, min_features, max_features):
-    if len(mol.GetConformers()) == 1:
+def process_mol(mol, nconf, seed, binstep, tolerance=0, min_features=1, max_features=6):
+    if len(mol.GetConformers()) <= 1:
         mol = gen_confs(mol=mol, nconf=nconf, seed=seed)
     hashes = gen_hashes(mol=mol, binstep=binstep, tolerance=tolerance, min_features=min_features, max_features=max_features)
     return mol.GetProp("_Name"), hashes
@@ -50,7 +51,7 @@ def gen_confs(mol, nconf, seed):
     return mol
 
 
-def gen_hashes(mol, binstep, tolerance, min_features, max_features):
+def gen_hashes(mol, binstep, tolerance=0, min_features=1, max_features=6):
     """
     Attachment point features will be always present in output combination. Thus, min_features is the minimum number of
     added other features, max_features is correspondingly the maximum number of other features.
@@ -59,20 +60,28 @@ def gen_hashes(mol, binstep, tolerance, min_features, max_features):
 
     :param mol: multi-conformer Mol
     :param binstep:
+    :param tolerance:
     :param min_features:
     :param max_features:
-    :param directed: False if attachment point is encoded by undirected feature and True if it should be encoded
-                     by a directed feature (a combination of starting and ending features)
     :return:
     """
     hashes = []
+
     for p in load_multi_conf_mol(mol, smarts_features=smarts, bin_step=binstep, cached=True):
-        feature_ids = list(range(sum(p.get_features_count().values())))
-        if min_features > len(feature_ids):
-            return
-        for n in range(min_features, min(max_features + 1, len(feature_ids))):
-            for comb in combinations(feature_ids, n):
-                hashes.append(p.get_signature_md5(ids=list(comb), tol=tolerance))
+
+        feature_ids = p.get_feature_ids()
+        att_id = feature_ids['T'][0]
+        del feature_ids['T']
+        other_ids = list(sorted(chain.from_iterable(feature_ids.values())))
+
+        if min_features > len(other_ids):
+            return tuple()
+
+        max_features_ = min(max_features, len(other_ids))
+        for n in range(min_features, max_features_ + 1):
+            for comb in combinations(other_ids, n):
+                hashes.append(p.get_signature_md5(ids=[att_id] + list(comb), tol=tolerance))
+
     return tuple(set(hashes))
 
 
@@ -100,23 +109,22 @@ def main():
 
     pool = Pool(args.ncpu)
 
-    if not os.path.isfile(args.output):
+    if not path.isfile(args.output):
         create_db(args.output)
 
     con = sqlite3.connect(args.output)
     cur = con.cursor()
 
-    for i, (smi, hashes) in enumerate(pool.imap_unordered(partial(process_smi,
+    for i, (smi, hashes) in enumerate(pool.imap_unordered(partial(process_mol,
                                                                   nconf=args.nconf,
                                                                   seed=args.seed,
                                                                   binstep=args.binstep,
                                                                   tolerance=args.tolerance,
-                                                                  min_features=2,
+                                                                  min_features=1,
                                                                   max_features=6),
                                                           read_smi(args.input, args.output)), 1):
         if not hashes:
             continue
-        # print(i, smi, hashes)
         try:
             smi_id = list(cur.execute("INSERT OR IGNORE INTO frags(smi) VALUES(?) RETURNING id", (smi, )))[0][0]
             cur.executemany("INSERT INTO hashes(id, hash) VALUES(?, ?)", [(smi_id, h) for h in hashes])
@@ -124,7 +132,6 @@ def main():
         except IndexError:
             print(i, smi, len(hashes))
             print('-')
-            # print(smi, list(cur.execute("INSERT OR IGNORE INTO frags(smi) VALUES(?) RETURNING id", (smi, ))))
 
     sql = "CREATE INDEX hashes_hash_idx ON hashes(hash)"
     con.execute(sql)
