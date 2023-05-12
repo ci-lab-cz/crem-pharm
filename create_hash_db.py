@@ -15,7 +15,6 @@ from rdkit.Chem import AllChem
 from read_input import read_input
 
 smarts = load_smarts(path.join(path.dirname(path.realpath(__file__)), 'smarts_features.txt'))
-# smarts['T'] = ((Chem.MolFromSmarts('[50F]')), )
 
 
 def create_db(fname):
@@ -35,6 +34,12 @@ def read_smi(fname, dbname):
     with sqlite3.connect(dbname) as con:
         for mol, title in read_input(fname, sdf_confs=fname.endswith('.sdf')):
             if not con.execute("SELECT EXISTS(SELECT 1 FROM frags WHERE smi = ?)", (title, )).fetchone()[0]:
+                mol = Chem.RWMol(mol)
+                for a in mol.GetAtoms():
+                    if a.GetAtomicNum() == 0:
+                        a.SetAtomicNum(9)
+                        a.SetIsotope(50)
+                mol = Chem.Mol(mol)
                 yield mol
 
 
