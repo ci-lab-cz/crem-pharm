@@ -498,26 +498,30 @@ def select_mols(mols, ncpu=1):
 
     pool = Pool(ncpu) if ncpu > 0 else None
 
-    mols = [(Chem.RemoveHs(mol), mol.GetNumHeavyAtoms()) for mol in mols]
-    mols = [(mol, hac, fused_ring_atoms(mol)) for mol, hac in mols]   # mol, hac, list of sets with ids of ring systems required for substructure check
-    mols = sorted(mols, key=itemgetter(1))
-    hacs = np.array([item[1] for item in mols])
-    deleted = np.zeros(hacs.shape)
+    try:
+        mols = [(Chem.RemoveHs(mol), mol.GetNumHeavyAtoms()) for mol in mols]
+        mols = [(mol, hac, fused_ring_atoms(mol)) for mol, hac in mols]   # mol, hac, list of sets with ids of ring systems required for substructure check
+        mols = sorted(mols, key=itemgetter(1))
+        hacs = np.array([item[1] for item in mols])
+        deleted = np.zeros(hacs.shape)
 
-    for i, (mol, hac, ring_ids) in enumerate(mols):
-        if not deleted[i]:
-            mol_ids = np.where(np.logical_and(hacs >= hac, deleted == 0))[0]
-            mol_ids = np.delete(mol_ids, np.argwhere(mol_ids == i))
-            if pool is None:
-                remove_ids = [j for j in mol_ids if check_substr_mols(mols[j][0], mols[j][2], mol)]
-            else:
-                mask = list(pool.starmap(partial(check_substr_mols, small=mol),
-                                         ((mols[mol_id][0], mols[mol_id][2]) for mol_id in mol_ids)))
-                remove_ids = mol_ids[mask]
+        for i, (mol, hac, ring_ids) in enumerate(mols):
+            if not deleted[i]:
+                mol_ids = np.where(np.logical_and(hacs >= hac, deleted == 0))[0]
+                mol_ids = np.delete(mol_ids, np.argwhere(mol_ids == i))
+                if pool is None:
+                    remove_ids = [j for j in mol_ids if check_substr_mols(mols[j][0], mols[j][2], mol)]
+                else:
+                    mask = list(pool.starmap(partial(check_substr_mols, small=mol),
+                                             ((mols[mol_id][0], mols[mol_id][2]) for mol_id in mol_ids)))
+                    remove_ids = mol_ids[mask]
 
-            deleted[remove_ids] = 1
+                deleted[remove_ids] = 1
+        output = [mols[i][0] for i in np.where(deleted == 0)[0]]
+    finally:
+        pool.close()
 
-    return [mols[i][0] for i in np.where(deleted == 0)[0]]
+    return output
 
 
 def save_mols(mols, sdf_fname):
