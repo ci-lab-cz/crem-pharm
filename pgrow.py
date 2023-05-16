@@ -763,7 +763,7 @@ def get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_
     # print(f'__gen_conf: {mol.GetNumConformers()} confs, {time.process_time() - start}')
     # start = time.process_time()
 
-    mol = remove_confs_rms(mol)
+    # mol = remove_confs_rms(mol)  # TODO: do we need this condition?
 
     # print(f'remove_confs_rms: {mol.GetNumConformers()} confs, {time.process_time() - start}')
     # start = time.process_time()
