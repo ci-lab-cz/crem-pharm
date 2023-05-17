@@ -436,6 +436,7 @@ def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd, ncpu):
                     AllChem.TransformMol(m, rotate_mat, k, keepConfs=True)
                     w.write(m, k)
     w.close()
+    pool.close()
 
     return True
 
@@ -1104,7 +1105,6 @@ def main():
     if args.hostfile is not None:
         with open(args.hostfile) as f:
             dask_client = Client(f.readline().strip() + ':8786')
-    pool = Pool(args.ncpu)
 
     if not os.path.isdir(args.output):
         os.makedirs(args.output, exist_ok=True)
