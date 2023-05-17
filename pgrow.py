@@ -496,7 +496,7 @@ def select_mols(mols, ncpu=1):
     :return:
     """
 
-    pool = Pool(ncpu) if ncpu > 0 else None
+    pool = Pool(ncpu) if ncpu > 1 else None
 
     try:
         mols = [(Chem.RemoveHs(mol), mol.GetNumHeavyAtoms()) for mol in mols]
@@ -581,7 +581,7 @@ def merge_confs(mols_dict):
     return list(smiles.values())
 
 
-def save_res(mols, db_fname, parent_mol_id=None):
+def save_res(mols, db_fname):
 
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
@@ -590,6 +590,7 @@ def save_res(mols, db_fname, parent_mol_id=None):
         if mol_id is None:
             mol_id = 0
         for mol in mols:
+            parent_mol_id = mol.GetPropsAsDict().get('parent_mol_id', None)
             mol_id += 1
             mol.SetProp('_Name', str(mol_id))
             for conf in mol.GetConformers():
@@ -869,27 +870,6 @@ def filter_by_hashes(row_ids, cur, radius, db_hashes, hashes):
     return output_row_ids
 
 
-def enumerate_hashes(att_positions, feature_positions, bin_step, max_features=5):
-    output_hashes = set()
-    for pos in att_positions:
-        p = P(cached=True, bin_step=bin_step)
-        p.load_from_feature_coords(feature_positions + [('T', tuple(pos))])
-        # feature_ids = p.get_feature_ids()
-        # att_id = feature_ids['T'][0]
-        # other_ids = []
-        # for k, v in feature_ids.items():
-        #     if k != 'T':
-        #         other_ids.extend(v)
-        # max_features = min(max_features, len(other_ids))
-        # hashes = []
-        # for n in range(1, max_features + 1):
-        #     for comb in combinations(other_ids, n):
-        #         hashes.append(p.get_signature_md5(ids=[att_id] + list(comb)))
-        # output_hashes.update(hashes)
-        output_hashes.add(p.get_signature_md5())
-    return output_hashes
-
-
 def enumerate_hashes_directed(mol, att_ids, feature_positions, bin_step, directed):
 
     output_hashes = set()
@@ -914,6 +894,145 @@ def enumerate_hashes_directed(mol, att_ids, feature_positions, bin_step, directe
                 output_hashes.add(p.get_signature_md5())
 
     return output_hashes
+
+
+def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rtb, max_logp, hash_db, hash_db_bin_step,
+               crem_db, radius, max_replacements, nconf, conf_gen, dist, exclusion_volume_dist, seed,
+               output_dir, dask_num_workers=0, ncpu=1):
+
+    timings = []
+    start = timeit.default_timer()
+
+    new_pids = pharmacophore.select_nearest_cluster(tuple(map(int, mol.GetProp('visited_ids').split(','))))
+    atom_ids = get_grow_atom_ids(mol, pharmacophore.get_xyz(new_pids))
+    kwargs = get_features(pharmacophore, new_pids, additional_features)
+    kwargs = {**kwargs, **get_property_restrictions(mol, max_mw=max_mw, max_tpsa=max_tpsa, max_rtb=max_rtb,
+                                                    max_logp=max_logp)}
+
+    # create additional constrains for selection of fragments which will be attached during growing
+    __max_features = 6  # max number of enumerated feature combinations in 3D pharm hash db
+    use_hash_db = hash_db is not None and len(new_pids) <= __max_features
+    hashes = []
+    if use_hash_db:
+        feature_positions = pharmacophore.get_feature_coords(new_pids)
+        hashes = enumerate_hashes_directed(mol=mol, att_ids=atom_ids, feature_positions=feature_positions,
+                                           bin_step=hash_db_bin_step, directed=False)
+
+    timings.append(f'preprocessing: {round(timeit.default_timer() - start, 4)}')
+    start2 = timeit.default_timer()
+
+    new_mols = list(grow_mol(mol, crem_db, radius=radius, min_atoms=1, max_atoms=12,
+                             max_replacements=max_replacements, replace_ids=atom_ids, return_mol=True,
+                             ncores=1,
+                             filter_func=partial(filter_by_hashes, db_hashes=hash_db, hashes=hashes) if use_hash_db else None,
+                             **kwargs))
+
+    timings.append(f'mol grow: {len(new_mols)} mols, {round(timeit.default_timer() - start2, 4)}')
+    start2 = timeit.default_timer()
+
+    if new_mols:
+        new_mols = remove_mols_by_property(new_mols, max_mw=max_mw, max_tpsa=max_tpsa, max_rtb=max_rtb, max_logp=max_logp)
+
+    timings.append(f'mol grow after physchem rules: {len(new_mols)} mols, {round(timeit.default_timer() - start2, 4)}')
+    start2 = timeit.default_timer()
+
+    new_isomers = []
+    if new_mols:
+        for smi, m in new_mols:
+            new_isomers.extend(gen_stereo(m))
+
+    timings.append(f'stereo enumeration: {len(new_isomers)} isomers, {round(timeit.default_timer() - start2, 4)}')
+    start2 = timeit.default_timer()
+
+    new_mols_dict = defaultdict(list)  # {parent_conf_id_1: [mol1, mol2, ...], ... }
+
+    if new_isomers:
+
+        inputs = [(new_isomer, conf.GetId()) for new_isomer, conf in product(new_isomers, mol.GetConformers())]
+
+        if dask_num_workers:
+            b = bag.from_sequence(inputs, npartitions=dask_num_workers * 2)
+            for conf_id, m in b.starmap(get_confs,
+                                        template_mol=mol,
+                                        nconfs=nconf,
+                                        conf_alg=conf_gen,
+                                        pharm=pharmacophore,
+                                        new_pids=new_pids,
+                                        dist=dist,
+                                        evol=exclusion_volume_dist,
+                                        seed=seed).compute():
+                if m:
+                    new_mols_dict[conf_id].append(m)
+        else:
+            pool = Pool(ncpu)
+            for conf_id, m in pool.starmap(partial(get_confs,
+                                                   template_mol=mol,
+                                                   nconfs=nconf,
+                                                   conf_alg=conf_gen,
+                                                   pharm=pharmacophore,
+                                                   new_pids=new_pids,
+                                                   dist=dist,
+                                                   evol=exclusion_volume_dist,
+                                                   seed=seed),
+                                           inputs):
+                if m:
+                    new_mols_dict[conf_id].append(m)
+            pool.close()
+
+            # for m, template_conf_id in inputs:
+            #     conf_id, confs = get_confs(mol=m, template_conf_id=template_conf_id, template_mol=mol, nconfs=nconf,
+            #                                conf_alg=conf_gen, pharm=pharmacophore, new_pids=new_pids, dist=dist,
+            #                                evol=exclusion_volume_dist, seed=seed)
+            #     if confs:
+            #         new_mols[conf_id].append(confs)
+
+    timings.append(f'conf generation: {sum(len(v) for v in new_mols_dict.values())} molecules, {round(timeit.default_timer() - start2, 4)}')
+    start2 = timeit.default_timer()
+
+    if new_mols_dict:
+        # keep only conformers with maximum number of matched features
+        max_count = 0
+        for v in new_mols_dict.values():
+            for m in v:
+                for c in m.GetConformers():
+                    if c.GetIntProp('matched_ids_count') > max_count:
+                        max_count = c.GetIntProp('matched_ids_count')
+
+        for v in new_mols_dict.values():  # list of mols
+            for i in reversed(range(len(v))):
+                cids = []
+                for c in v[i].GetConformers():
+                    if c.GetIntProp('matched_ids_count') < max_count:
+                        cids.append(c.GetId())
+                if len(cids) == v[i].GetNumConformers():
+                    del v[i]
+                else:
+                    for cid in cids:
+                        v[i].RemoveConformer(cid)
+
+    timings.append(f'conf filtering: {sum(len(v) for v in new_mols_dict.values())} compounds, {round(timeit.default_timer() - start2, 4)}')
+    start2 = timeit.default_timer()
+
+    if new_mols:
+        new_mols = merge_confs(new_mols_dict)  # return list of mols
+        new_mols = [remove_confs_rms(m) for m in new_mols]
+
+    timings.append(f'merge confs and remove by rms: {len(new_mols)} compounds, {round(timeit.default_timer() - start2, 4)}')
+    start2 = timeit.default_timer()
+
+    if new_mols:
+        with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}.pkl'), 'wb') as f:
+            pickle.dump(new_mols, f)
+        new_mols = select_mols(new_mols, ncpu=ncpu)
+
+    timings.append(f'mol selection: {len(new_mols)} compounds, {round(timeit.default_timer() - start2, 4)}')
+
+    for m in new_mols:
+        m.SetProp('parent_mol_id', mol.GetProp('_Name'))
+
+    timings.append(f'overall time: {round(timeit.default_timer() - start, 4)}')
+
+    return new_mols, len(new_isomers), timings
 
 
 def main():
@@ -1045,141 +1164,31 @@ def main():
 
     while mol:
 
-        print(f"===== {mol.GetProp('_Name')} =====")
-        start = timeit.default_timer()
-
-        new_pids = p.select_nearest_cluster(tuple(map(int, mol.GetProp('visited_ids').split(','))))
-        atom_ids = get_grow_atom_ids(mol, p.get_xyz(new_pids))
-        kwargs = get_features(p, new_pids, args.additional_features)
-        kwargs = {**kwargs, **get_property_restrictions(mol, max_mw=args.mw, max_tpsa=args.tpsa, max_rtb=args.rtb, max_logp=args.logp)}
-
-        # create additional constrains for selection of fragments which will be attached during growing
-        __max_features = 6   # max number of enumerated feature combinations in 3D pharm hash db
-        use_hash_db = args.hash_db is not None and len(new_pids) <= __max_features
-        hashes = []
-        if use_hash_db:
-            feature_positions = p.get_feature_coords(new_pids)
-            hashes = enumerate_hashes_directed(mol=mol, att_ids=atom_ids, feature_positions=feature_positions,
-                                               bin_step=args.hash_db_bin_step, directed=False)
-
-        print(f'preprocessing: {round(timeit.default_timer() - start, 4)}')
-        sys.stdout.flush()
-        start2 = timeit.default_timer()
-
-        new_mols = list(grow_mol(mol, args.db, radius=args.radius, min_atoms=1, max_atoms=12,
-                                 max_replacements=args.max_replacements, replace_ids=atom_ids, return_mol=True,
-                                 ncores=args.ncpu,
-                                 filter_func=partial(filter_by_hashes, db_hashes=args.hash_db, hashes=hashes) if use_hash_db else None,
-                                 **kwargs))
-
-        print(f'mol grow: {len(new_mols)} mols, {round(timeit.default_timer() - start2, 4)}')
-        sys.stdout.flush()
-        start2 = timeit.default_timer()
-
-        new_mols = remove_mols_by_property(new_mols, max_mw=args.mw, max_tpsa=args.tpsa, max_rtb=args.rtb, max_logp=args.logp)
-
-        print(f'mol grow after physchem rules: {len(new_mols)} mols, {round(timeit.default_timer() - start2, 4)}')
-        sys.stdout.flush()
-        start2 = timeit.default_timer()
-
-        new_isomers = []
-        for isomers in pool.imap_unordered(gen_stereo, (m[1] for m in new_mols)):
-            new_isomers.extend(isomers)
-
-        print(f'stereo enumeration: {len(new_isomers)} isomers, {round(timeit.default_timer() - start2, 4)}')
-        sys.stdout.flush()
-        start2 = timeit.default_timer()
-
-        new_mols = defaultdict(list)   # {parent_conf_id_1: [mol1, mol2, ...], ... }
-        inputs = [(new_isomer, conf.GetId()) for new_isomer, conf in product(new_isomers, mol.GetConformers())]
-
-        if args.hostfile is not None:
-            b = bag.from_sequence(inputs, npartitions=args.num_workers * 2)
-            for conf_id, m in b.starmap(get_confs,
-                                        template_mol=mol,
-                                        nconfs=args.nconf,
-                                        conf_alg=args.conf_gen,
-                                        pharm=p,
-                                        new_pids=new_pids,
-                                        dist=args.dist,
-                                        evol=args.exclusion_volume,
-                                        seed=args.seed).compute():
-                if m:
-                    new_mols[conf_id].append(m)
-        else:
-            for conf_id, m in pool.starmap(partial(get_confs,
-                                                   template_mol=mol,
-                                                   nconfs=args.nconf,
-                                                   conf_alg=args.conf_gen,
-                                                   pharm=p,
-                                                   new_pids=new_pids,
-                                                   dist=args.dist,
-                                                   evol=args.exclusion_volume,
-                                                   seed=args.seed),
-                                           inputs):
-                if m:
-                    new_mols[conf_id].append(m)
-
-        print(f'conf generation: {sum(len(v) for v in new_mols.values())} molecules, {round(timeit.default_timer() - start2, 4)}')
-        sys.stdout.flush()
-        start2 = timeit.default_timer()
-
-        # keep only conformers with maximum number of matched features
-        max_count = 0
-        for v in new_mols.values():
-            for m in v:
-                for c in m.GetConformers():
-                    if c.GetIntProp('matched_ids_count') > max_count:
-                        max_count = c.GetIntProp('matched_ids_count')
-
-        for v in new_mols.values():  # list of mols
-            for i in reversed(range(len(v))):
-                cids = []
-                for c in v[i].GetConformers():
-                    if c.GetIntProp('matched_ids_count') < max_count:
-                        cids.append(c.GetId())
-                if len(cids) == v[i].GetNumConformers():
-                    del v[i]
-                else:
-                    for cid in cids:
-                        v[i].RemoveConformer(cid)
-
-        print(f'conf filtering: {sum(len(v) for v in new_mols.values())} compounds, {round(timeit.default_timer() - start2, 4)}')
-        sys.stdout.flush()
-        start2 = timeit.default_timer()
-
-        new_mols = merge_confs(new_mols)   # return list of mols
-        new_mols = [remove_confs_rms(m) for m in new_mols]
-
-        print(f'merge confs and remove by rms: {len(new_mols)} compounds, {round(timeit.default_timer() - start2, 4)}')
-        sys.stdout.flush()
-        start2 = timeit.default_timer()
+        new_mols, conf_mol_count, timings = expand_mol(mol=mol, pharmacophore=p,
+                                                       additional_features=args.additional_features,
+                                                       max_mw=args.mw, max_tpsa=args.tpsa, max_rtb=args.rtb,
+                                                       max_logp=args.logp, hash_db=args.hash_db,
+                                                       hash_db_bin_step=args.hash_db_bin_step, crem_db=args.db,
+                                                       radius=args.radius, max_replacements=args.max_replacements,
+                                                       nconf=args.nconf, conf_gen=args.conf_gen, dist=args.dist,
+                                                       exclusion_volume_dist=args.exclusion_volume, seed=args.seed,
+                                                       output_dir=args.output, dask_num_workers=0, ncpu=args.ncpu)
 
         if new_mols:
-            with open(os.path.join(args.output, f'{mol.GetProp("_Name")}.pkl'), 'wb') as f:
-                pickle.dump(new_mols, f)
-            new_mols = select_mols(new_mols, ncpu=args.ncpu)
 
-        print(f'mol selection: {len(new_mols)} compounds, {round(timeit.default_timer() - start2, 4)}')
+            save_res(new_mols, res_db_fname)
+
+            update_db(res_db_fname, int(mol.GetProp('_Name')), conf_mol_count)
+
+        print(f'===== {mol.GetProp("_Name")} =====')
+        print('\n'.join(timings))
         sys.stdout.flush()
-        # start2 = timeit.default_timer()
-
-        parent_mol_id = int(mol.GetProp('_Name'))
-        save_res(new_mols, res_db_fname, parent_mol_id=parent_mol_id)
-
-        update_db(res_db_fname, parent_mol_id, len(new_isomers))
-
-        print('saved mols:', len(new_mols))
 
         search_deep = True
         if mol.GetProp('visited_ids').count(',') + 1 == p.get_num_features() or not new_mols:
             search_deep = False
         print('search deep: ', search_deep)
         mol = choose_mol_to_grow(res_db_fname, p.get_num_features(), search_deep=search_deep)
-
-        print(f'overall time {round(timeit.default_timer() - start, 4)}')
-
-        sys.stdout.flush()
 
 
 if __name__ == '__main__':
