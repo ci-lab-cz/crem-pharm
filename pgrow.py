@@ -1124,10 +1124,8 @@ def main():
 
     res_db_fname = os.path.join(args.output, 'res.db')
 
-    if os.path.isfile(res_db_fname):  # restart if db existed
-        mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
+    if not os.path.isfile(res_db_fname):  # create DB and match starting fragments
 
-    else:
         create_db(res_db_fname)
 
         conf_fname = os.path.join(args.output, f'iter0.sdf')
@@ -1160,7 +1158,7 @@ def main():
                 conf.SetProp('parent_conf_id', 'None')
         save_res(mols, res_db_fname)
 
-        mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
+    mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
 
     while mol:
 
