@@ -3,10 +3,7 @@
 import argparse
 import os
 import sys
-import shutil
-import json
 import pickle
-from sklearn.cluster import AgglomerativeClustering
 from collections import defaultdict, Counter
 from multiprocessing import Pool
 from functools import partial
@@ -16,16 +13,12 @@ from operator import itemgetter
 import numpy as np
 import pandas as pd
 import sqlite3
-import subprocess
 import timeit
-import tempfile
 import yaml
-from math import cos, sin, pi
 
+from dask import bag
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolDescriptors
-# from rdkit.Chem.AllChem import AlignMol, EmbedMultipleConfs
-# from rdkit.Chem.rdForceFieldHelpers import UFFGetMoleculeForceField
 from rdkit.Chem.Crippen import MolLogP
 from rdkit.Chem.Descriptors import MolWt
 from rdkit.Chem.rdMolDescriptors import CalcNumRotatableBonds, CalcTPSA
@@ -34,93 +27,10 @@ from rdkit.Geometry.rdGeometry import Point3D
 from crem.crem import grow_mol
 from pmapper.utils import load_multi_conf_mol
 from pmapper.pharmacophore import Pharmacophore as P
-from psearch.database import DB
-from read_input import read_input
 from openbabel import openbabel as ob
 from openbabel import pybel
-from dask.distributed import Client
-from dask import bag
 
-
-class PharmModel2(P):
-
-    def __init__(self, bin_step=1, cached=False):
-        super().__init__(bin_step, cached)
-        self.clusters = defaultdict(set)
-        self.exclvol = None
-
-    def get_num_features(self):
-        return len(self._get_ids())
-
-    def get_xyz(self, ids):
-        return np.array([xyz for label, xyz in self.get_feature_coords(ids)])
-
-    def set_clusters(self, clustering_threshold, init_ids=None):
-        """
-
-        :param clustering_threshold:
-        :param ids: ids of features selected as a starting pharmacophore
-        :return:
-        """
-        ids = tuple(set(self._get_ids()) - set(init_ids))
-        coords = self.get_xyz(ids)
-        c = AgglomerativeClustering(n_clusters=None, distance_threshold=clustering_threshold).fit(coords)
-        for i, j in enumerate(c.labels_):
-            self.clusters[j].add(ids[i])
-
-    def get_subpharmacophore(self, ids):
-        coords = self.get_feature_coords(ids)
-        p = P()
-        p.load_from_feature_coords(coords)
-        return p
-
-    def select_nearest_cluster(self, ids):
-
-        def min_distance(ids1, ids2):
-            xyz1 = self.get_xyz(ids1)
-            xyz2 = self.get_xyz(ids2)
-            return np.min(cdist(xyz1, xyz2))
-
-        ids = set(ids)
-        selected_ids = tuple()
-        min_dist = float('inf')
-        for k, v in self.clusters.items():
-            if not v & set(ids):
-                dist = min_distance(ids, v)
-                if dist < min_dist:
-                    min_dist = dist
-                    selected_ids = tuple(v)
-        return selected_ids
-
-    def get_feature_coords_pd(self, ids=None):
-        ids = self._get_ids(ids)
-        data = [(i, label, x, y, z) for i, (label, (x, y, z)) in zip(ids, self.get_feature_coords(ids))]
-        coords = pd.DataFrame(data, columns=['id', 'label', 'x', 'y', 'z'])
-        return coords
-
-    def load_from_xyz(self, fname):
-        self.exclvol = []
-        with open(fname) as f:
-            feature_coords = []
-            f.readline()
-            line = f.readline().strip()
-            if line:
-                opts = dict(item.split('=') for item in line.split(';'))
-                if 'bin_step' in opts:
-                    self.update(bin_step=float(opts['bin_step']))
-            for line in f:
-                label, *coords = line.strip().split()
-                coords = tuple(map(float, coords))
-                if label != 'e':
-                    feature_coords.append((label, coords))
-                else:
-                    self.exclvol.append(coords)
-            self.load_from_feature_coords(tuple(feature_coords))
-        if self.exclvol:
-            self.exclvol = np.array(self.exclvol)
-        else:
-            self.exclvol = None
-
+from pgrow import PharmModel2
 
 def gen_stereo(mol):
     stereo_opts = StereoEnumerationOptions(tryEmbedding=True, maxIsomers=32)
@@ -242,7 +152,7 @@ def __gen_confs(mol, template_mol=None, nconf=10, seed=42, alg='rdkit', **kwargs
     return mol
 
 
-def get_grow_points2(mol_xyz, pharm_xyz, tol=2):
+def __get_grow_points2(mol_xyz, pharm_xyz, tol=2):
     dist = np.min(cdist(mol_xyz, pharm_xyz), axis=1)
     ids = np.flatnonzero(dist <= (np.min(dist) + tol))
     return ids.tolist()
@@ -258,7 +168,7 @@ def get_grow_atom_ids(mol, pharm_xyz, tol=2):
         if a.GetAtomicNum() > 1 and a.GetTotalNumHs() > 0:
             atoms_with_h.append(a.GetIdx())
     for c in mol.GetConformers():
-        ids.update(get_grow_points2(c.GetPositions()[atoms_with_h], pharm_xyz, tol))
+        ids.update(__get_grow_points2(c.GetPositions()[atoms_with_h], pharm_xyz, tol))
     res = list(sorted(atoms_with_h[i] for i in ids))
     return res
 
@@ -303,145 +213,6 @@ def remove_conf(mol, cids):
         mol.RemoveConformer(cid)
     reassing_conf_ids(mol)
     return mol
-
-
-def keep_confs(mol, ids):
-
-    all_ids = set(c.GetId() for c in mol.GetConformers())
-    remove_ids = all_ids - set(ids)
-    for cid in set(remove_ids):
-        mol.RemoveConformer(cid)
-    reassing_conf_ids(mol)
-    return mol
-
-
-def is_collinear(p, epsilon=0.01):
-    a = np.array([xyz for label, xyz in p.get_feature_coords()])
-    a = np.around(a, 3)
-    a = np.unique(a, axis=0)
-    if a.shape[0] < 2:
-        raise ValueError('Too few pharmacophore features were supplied. At least two features with distinct '
-                         'coordinates are required.')
-    if a.shape[0] == 2:
-        return True
-    d = cdist(a, a)
-    id1, id2 = np.where(d == np.max(d))[0]   # most distant features
-    max_dist = d[id1, id2]
-    for i in set(range(d.shape[0])) - {id1, id2}:
-        if max_dist - d[i, id1] - d[i, id2] > epsilon:
-            return False
-    return True
-
-
-def get_rotate_matrix(p1, p2, theta):
-
-    # https://sites.google.com/site/glennmurray/Home/rotation-matrices-and-formulas
-    diff = [j - i for i, j in zip(p1, p2)]
-    squaredSum = sum([i ** 2 for i in diff])
-    u2, v2, w2 = [i ** 2 / squaredSum for i in diff]
-    u = u2 ** 0.5 * (1 if diff[0] >= 0 else -1)   # to keep the sign
-    v = v2 ** 0.5 * (1 if diff[1] >= 0 else -1)
-    w = w2 ** 0.5 * (1 if diff[2] >= 0 else -1)
-
-    c = cos(pi * theta / 180)
-    s = sin(pi * theta / 180)
-
-    x, y, z = p1
-
-    m = [[u2 + (v2 + w2) * c,       u * v * (1 - c) - w * s,   u * w * (1 - c) + v * s,   (x * (v2 + w2) - u * (y * v + z * w)) * (1 - c) + (y * w - z * v) * s],
-         [u * v * (1 - c) + w * s,  v2 + (u2 + w2) * c,        v * w * (1 - c) - u * s,   (y * (u2 + w2) - v * (x * u + z * w)) * (1 - c) + (z * u - x * w) * s],
-         [u * w * (1 - c) - v * s,  v * w * (1 - c) + u * s,   w2 + (u2 + v2) * c,        (z * (u2 + v2) - w * (x * u + y * v)) * (1 - c) + (x * v - y * u) * s],
-         [0, 0, 0, 1]]
-
-    return np.array(m)
-
-
-def get_rotate_matrix_from_collinear_pharm(p, theta):
-    a = np.array([xyz for label, xyz in p.get_feature_coords()])
-    a = np.around(a, 3)
-    a = np.unique(a, axis=0)
-    d = cdist(a, a)
-    id1, id2 = np.where(d == np.max(d))[0]   # most distant features
-    return get_rotate_matrix(a[id1].tolist(), a[id2].tolist(), theta)
-
-
-def screen(mol_name, pharm_list, query_mol, query_nfeatures, rmsd):
-
-    # return one map, this can be a problem for fragments with different orientations and the same rmsd
-    # [NH2]c1nc([NH2])ncc1 - of two NH2 and n between were matched
-
-    rmsd_dict = dict()
-    for i, coords in enumerate(pharm_list):
-        p1 = P()
-        p1.load_from_feature_coords(coords)
-        m1 = p1.get_mol()
-        min_rmsd = float('inf')
-        min_ids = None
-        for ids1 in m1.GetSubstructMatches(query_mol):
-            a = AllChem.AlignMol(Chem.Mol(m1), query_mol, atomMap=tuple(zip(ids1, range(query_nfeatures))))
-            if a < min_rmsd:
-                min_rmsd = a
-                min_ids = ids1
-        if min_rmsd <= rmsd:
-            rmsd_dict[i] = AllChem.GetAlignmentTransform(Chem.Mol(m1), query_mol,
-                                                         atomMap=tuple(zip(min_ids, range(query_nfeatures))))
-    return mol_name, rmsd_dict
-
-
-def screen_mp(items):
-    return screen(*items)
-
-
-def supply_screen(db, query_mol, rmsd):
-    n = query_mol.GetNumAtoms()
-    mol_names = db.get_mol_names()
-    for mol_name in mol_names:
-        pharm_dict = db.get_pharm(mol_name)
-        try:
-            pharm_list = pharm_dict[0]   # because there is only one stereoisomer for each entry
-        except KeyError:
-            sys.stderr.write(f'{mol_name} does not have pharm_dict[0]\n')
-            continue
-        yield mol_name, pharm_list, query_mol, n, rmsd
-
-
-def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd, ncpu):
-
-    db = DB(db_fname)
-    query_mol = query_pharm.get_mol()
-
-    pool = Pool(ncpu)
-    d = []
-    for mol_name, rmsd_dict in pool.imap_unordered(screen_mp, supply_screen(db, query_mol, rmsd)):
-        if rmsd_dict:
-            d.append((mol_name, rmsd_dict))
-
-    if not d:
-        return False
-
-    # for additional sampling of collinear pharmacophores
-    theta = 10
-    if is_collinear(query_pharm):
-        rotate_mat = get_rotate_matrix_from_collinear_pharm(query_pharm, theta)
-    else:
-        rotate_mat = None
-
-    w = Chem.SDWriter(output_sdf)
-    for mol_name, rmsd_dict in d:
-        m = db.get_mol(mol_name)[0]
-        m.SetProp('_Name', mol_name)
-        for k, (rms, matrix) in rmsd_dict.items():
-            AllChem.TransformMol(m, matrix, k, keepConfs=True)
-            m.SetProp('rms', str(rms))
-            w.write(m, k)
-            if rotate_mat is not None:  # rotate molecule if pharmacophore features are collinear
-                for _ in range(360 // theta - 1):
-                    AllChem.TransformMol(m, rotate_mat, k, keepConfs=True)
-                    w.write(m, k)
-    w.close()
-    pool.close()
-
-    return True
 
 
 def fused_ring_atoms(m):
@@ -503,8 +274,8 @@ def select_mols(mols, ncpu=1):
     pool = Pool(ncpu) if ncpu > 1 else None
 
     try:
-        mols = [(Chem.RemoveHs(mol), mol.GetNumHeavyAtoms()) for mol in mols]
-        mols = [(mol, hac, fused_ring_atoms(mol)) for mol, hac in mols]   # mol, hac, list of sets with ids of ring systems required for substructure check
+        # mol, hac, list of sets with ids of ring systems required for substructure check
+        mols = [(Chem.RemoveHs(mol), mol.GetNumHeavyAtoms(), fused_ring_atoms(Chem.RemoveHs(mol))) for mol in mols]
         mols = sorted(mols, key=itemgetter(1))
         hacs = np.array([item[1] for item in mols])
         deleted = np.zeros(hacs.shape)
@@ -526,38 +297,6 @@ def select_mols(mols, ncpu=1):
         pool.close()
 
     return output
-
-
-def save_mols(mols, sdf_fname):
-    w = Chem.SDWriter(sdf_fname)
-    try:
-        with open(sdf_fname.rsplit('.', 1)[0] + '.pkl', 'wb') as wpkl:
-            for mol in mols:
-                pickle.dump((mol, mol.GetProp('_Name')), wpkl, -1)
-                for c in mol.GetConformers():
-                    w.write(mol, c.GetId())
-    finally:
-        w.close()
-
-
-def create_db(db_fname):
-    with sqlite3.connect(db_fname) as conn:
-        cur = conn.cursor()
-        cur.execute("DROP TABLE IF EXISTS mols")
-        cur.execute("CREATE TABLE mols("
-                    "id INTEGER NOT NULL, "
-                    "conf_id INTEGER NOT NULL, "
-                    "mol_block TEXT NOT NULL, "
-                    "matched_ids TEXT NOT NULL, "
-                    "visited_ids TEXT NOT NULL, "
-                    "matched_ids_count INTEGER NOT NULL, "
-                    "visited_ids_count INTEGER NOT NULL, "
-                    "parent_mol_id INTEGER, "
-                    "parent_conf_id INTEGER, "
-                    "nmols INTEGER NOT NULL, "
-                    "used INTEGER NOT NULL, "
-                    "time TEXT NOT NULL)")
-        conn.commit()
 
 
 def merge_confs(mols_dict):
@@ -583,104 +322,6 @@ def merge_confs(mols_dict):
                         c.SetAtomPosition(atom_id, Point3D(x, y, z))
                     smiles[smi].AddConformer(c, assignId=True)
     return list(smiles.values())
-
-
-def save_res(mols, db_fname):
-
-    with sqlite3.connect(db_fname) as conn:
-        cur = conn.cursor()
-        cur.execute('SELECT MAX(id) FROM mols')
-        mol_id = cur.fetchone()[0]
-        if mol_id is None:
-            mol_id = 0
-        for mol in mols:
-            parent_mol_id = mol.GetPropsAsDict().get('parent_mol_id', None)
-            mol_id += 1
-            mol.SetProp('_Name', str(mol_id))
-            for conf in mol.GetConformers():
-                mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
-                visited_ids = conf.GetProp('visited_ids')
-                visited_ids_count = visited_ids.count(',') + 1
-                matched_ids = conf.GetProp('matched_ids')
-                matched_ids_count = matched_ids.count(',') + 1
-                parent_conf_id = conf.GetProp('parent_conf_id')
-                if parent_conf_id == 'None':
-                    parent_conf_id = None
-                sql = 'INSERT INTO mols VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
-                cur.execute(sql, (mol_id, conf.GetId(), mol_block, matched_ids, visited_ids, matched_ids_count,
-                                  visited_ids_count, parent_mol_id, parent_conf_id, 0, 0))
-        conn.commit()
-
-
-def update_db(db_fname, mol_id, nmols):
-    with sqlite3.connect(db_fname) as conn:
-        while mol_id is not None:
-            cur = conn.cursor()
-            cur.execute('SELECT nmols FROM mols WHERE id = %i' % mol_id)
-            n = cur.fetchone()[0] + nmols
-            cur.execute('UPDATE mols SET nmols = %i WHERE id = %i' % (n, mol_id))
-            conn.commit()
-            cur.execute('SELECT parent_mol_id FROM mols WHERE id = %i' % mol_id)
-            mol_id = cur.fetchone()[0]
-
-
-def choose_mol_to_grow(db_fname, max_features, search_deep=True):
-
-    with sqlite3.connect(db_fname) as conn:
-        cur = conn.cursor()
-
-        if search_deep:
-            cur.execute(f"""SELECT id, conf_id, mol_block, matched_ids, visited_ids 
-                            FROM mols 
-                            WHERE id = (
-                              SELECT id
-                              FROM mols
-                              WHERE visited_ids_count < {max_features} AND used = 0
-                              ORDER BY
-                                visited_ids_count - matched_ids_count,
-                                matched_ids_count DESC,
-                                rowid DESC
-                              LIMIT 1
-                            )""")
-        else:
-            cur.execute(f"""SELECT id, conf_id, mol_block, matched_ids, visited_ids 
-                            FROM mols 
-                            WHERE id = (
-                              SELECT c.id FROM (
-                                SELECT DISTINCT 
-                                  a.id, 
-                                  a.matched_ids_count, 
-                                  a.visited_ids_count, 
-                                  ifnull(b.nmols, a.nmols) AS parent_nmols
-                                FROM (SELECT * FROM mols WHERE visited_ids_count < {max_features} AND used = 0) AS a
-                                LEFT JOIN mols b ON b.id = a.parent_mol_id
-                                ORDER BY
-                                  a.visited_ids_count,
-                                  a.visited_ids_count - a.matched_ids_count,
-                                  parent_nmols
-                                LIMIT 1
-                              ) AS c
-                            )""")
-
-        res = cur.fetchall()
-        if not res:
-            return None
-
-        mol = Chem.MolFromMolBlock(res[0][2])
-        mol.SetProp('_Name', str(res[0][0]))
-        mol.SetProp('visited_ids', res[0][4])
-        mol.GetConformer().SetId(res[0][1])
-        mol.GetConformer().SetProp('matched_ids', res[0][3])
-        for mol_id, conf_id, mol_block, matched_ids, visited_ids in res[1:]:
-            m = Chem.MolFromMolBlock(mol_block)
-            m.GetConformer().SetId(conf_id)
-            m.GetConformer().SetProp('matched_ids', matched_ids)
-            mol.AddConformer(m.GetConformer(), assignId=False)
-
-        cur.execute('UPDATE mols SET used = 1 WHERE id = %i' % res[0][0])
-        conn.commit()
-
-        return mol
 
 
 def remove_confs_exclvol(mol, exclvol_xyz, threshold):
@@ -1024,7 +665,7 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
     timings.append(f'merge confs and remove by rms: {len(new_mols)} compounds, {round(timeit.default_timer() - start2, 4)}')
     start2 = timeit.default_timer()
 
-    if new_mols:
+    if len(new_mols) > 1:
         with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}.pkl'), 'wb') as f:
             pickle.dump(new_mols, f)
         new_mols = select_mols(new_mols, ncpu=ncpu)
@@ -1040,217 +681,45 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Grow structures to fit query pharmacophore.')
-    parser.add_argument('-q', '--query', metavar='FILENAME', required=True,
-                        help='pharmacophore model.')
-    parser.add_argument('--ids', metavar='INTEGER', required=True, nargs='+', type=int,
-                        help='ids of pharmacophore features used for initial screening. 0-index based.')
-    parser.add_argument('-o', '--output', metavar='DIRNAME', required=True,
-                        help='path to directory where intermediate and final results will be stored. '
-                             'If output db file (res.db) exists in the directory the computation will be continued '
-                             '(skip screening of initial fragment DB).')
-    parser.add_argument('-t', '--clustering_threshold', metavar='NUMERIC', required=False, type=float, default=3,
-                        help='threshold to determine clusters. Default: 3.')
-    parser.add_argument('-f', '--fragments', metavar='FILENAME', required=True,
-                        help='file with initial fragments - DB in pmapper format.')
-    parser.add_argument('-d', '--db', metavar='FILENAME', required=True,
-                        help='database with interchangeable fragments.')
-    parser.add_argument('-r', '--radius', metavar='INTEGER', type=int, choices=[1, 2, 3, 4, 5], default=3,
-                        help='radius of a context of attached fragments.')
-    parser.add_argument('--max_replacements', metavar='INTEGER', type=int, default=None,
-                        help='maximum number of fragments considered for growing. By default all fragments are '
-                             'considered, that may cause combinatorial explosion in some cases.')
-    parser.add_argument('-x', '--additional_features', action='store_true', default=False,
-                        help='indicate if the fragment database contains pharmacophore features to be used for '
-                             'fragment selection.')
-    parser.add_argument('-n', '--nconf', metavar='INTEGER', required=False, type=int, default=20,
-                        help='number of conformers generated per structure. Default: 20.')
-    parser.add_argument('--conf_gen', metavar='STRING', required=False, type=str, default='rdkit',
-                        help='can take "rdkit" or "ob" values to choose conformer generator. Default: rdkit.')
-    parser.add_argument('-s', '--seed', metavar='INTEGER', required=False, type=int, default=-1,
-                        help='seed for random number generator to get reproducible output. Default: -1.')
-    parser.add_argument('--dist', metavar='NUMERIC', required=False, type=float, default=1,
-                        help='maximum distance to discard conformers in fast filtering. Default: 1.')
-    parser.add_argument('-e', '--exclusion_volume', metavar='NUMERIC', required=False, type=float, default=-1,
-                        help='radius of exclusion volumes (distance to heavy atoms). By default exclusion volumes are '
-                             'disabled even if they are present in a query pharmacophore. To enable them set '
-                             'a positive numeric value.')
-    parser.add_argument('--mw', metavar='NUMERIC', required=False, type=float, default=450,
-                        help='Maximum molecular weight of generated compounds. Default: 450.')
-    parser.add_argument('--tpsa', metavar='NUMERIC', required=False, type=float, default=120,
-                        help='Maximum TPSA of generated compounds. Default: 120.')
-    parser.add_argument('--rtb', metavar='NUMERIC', required=False, type=float, default=7,
-                        help='Maximum number of rotatable bonds in generated compounds. Default: 7.')
-    parser.add_argument('--logp', metavar='NUMERIC', required=False, type=float, default=4,
-                        help='Maximum logP of generated compounds. Default: 4.')
-    parser.add_argument('--hash_db', metavar='FILENAME', required=False, default=None,
-                        help='database with 3D pharmacophore hashes for additional filtering of fragments for growing.')
-    parser.add_argument('--hash_db_bin_step', metavar='NUMERIC', required=False, default=1, type=float,
-                        help='bin step used to create 3D pharmacophore hashes.')
-    # parser.add_argument('--hash_db_directed', required=False, default=False, action='store_true',
-    #                     help='if set direction of attachment points will be considered during calculation of '
-    #                          '3D pharmacophore hashes.')
-    parser.add_argument('-u', '--hostfile', metavar='FILENAME', required=False, type=str, default=None,
-                        help='text file with addresses of nodes of dask SSH cluster. The most typical, it can be '
-                             'passed as $PBS_NODEFILE variable from inside a PBS script. The first line in this file '
-                             'will be the address of the scheduler running on the standard port 8786. If omitted, '
-                             'calculations will run on a single machine as usual.')
-    parser.add_argument('-w', '--num_workers', metavar='INTEGER', required=False, type=int, default=100,
-                        help='the number of workers to be spawn by the dask cluster. For efficiency it seems that '
-                             'it should be equal to the total number of cores requested by the cluster. Default: 100.')
-    parser.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
-                        help='number of cpu cores to use. Default: 1.')
+    parser = argparse.ArgumentParser(description='Expand a molecule to match the closest pharmacophore features.')
+    parser.add_argument('-i', '--input', metavar='FILENAME', required=True,
+                        help='PKL (pickled) file with a single molecule to expand.')
+    parser.add_argument('-o', '--output', metavar='FILENAME', required=True,
+                        help='PKL (pickled) file with multiple output molecules. Additional fields should have all '
+                             'necessary information.')
+    parser.add_argument('-p', '--pharm', metavar='FILENAME', required=True,
+                        help='PKL (pickled) file name of a pharmacophore object.')
+    parser.add_argument('--config', metavar='FILENAME', required=True,
+                        help='YAML file name with all other settings settings.')
+    parser.add_argument('--conf_count', metavar='FILENAME', required=True,
+                        help='text file with the number of molecules for which conformers were embedded.')
+    parser.add_argument('--debug', metavar='FILENAME', required=False,
+                        help='text file with some additional information.')
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 
     args = parser.parse_args()
 
-    if args.hostfile is not None:
-        with open(args.hostfile) as f:
-            dask_client = Client(f.readline().strip() + ':8786')
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
 
-    if not os.path.isdir(args.output):
-        os.makedirs(args.output, exist_ok=True)
+    with open(args.pharm, 'rb') as f:
+        pharm = pickle.load(f)
 
-    with open(os.path.join(args.output, 'setup.json'), 'wt') as f:
-        f.write(json.dumps(vars(args), indent=4))
+    with open(args.input, 'rb') as f:
+        mol = pickle.load(f)
 
-    shutil.copyfile(args.query, os.path.join(args.output, os.path.basename(args.query)))
+    new_mols, conf_count, timings = expand_mol(mol=mol, pharmacophore=pharm, **config)
 
-    args.ids = tuple(sorted(set(args.ids)))
+    with open(args.output, 'wb') as f:
+        pickle.dump(new_mols, f)
 
-    p = PharmModel2()
-    p.load_from_xyz(args.query)
-    p.set_clusters(args.clustering_threshold, args.ids)
+    if args.debug:
+        with open(args.debug, 'wt') as f:
+            f.write('\n'.join(timings) + '\n')
 
-    print(p.clusters)
-
-    res_db_fname = os.path.join(args.output, 'res.db')
-
-    if not os.path.isfile(res_db_fname):  # create DB and match starting fragments
-
-        create_db(res_db_fname)
-
-        conf_fname = os.path.join(args.output, f'iter0.sdf')
-
-        new_pids = tuple(args.ids)
-
-        print(f"===== Initial screening =====")
-        start = timeit.default_timer()
-
-        flag = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments,
-                              output_sdf=conf_fname, rmsd=0.2, ncpu=args.ncpu)
-        if not flag:
-            exit('No matches between starting fragments and the chosen subpharmacophore.')
-
-        print(f'{round(timeit.default_timer() - start, 4)}')
-
-        mols = [mol for mol, mol_name in read_input(conf_fname, sdf_confs=True)]
-        mols = [remove_confs_exclvol(mol, p.exclvol, args.exclusion_volume) for mol in mols]
-        mols = [m for m in mols if m]  # remove None objects
-        mols = select_mols(mols, ncpu=args.ncpu)
-        ids = ','.join(map(str, new_pids))
-        for mol in mols:
-            mol.SetProp('visited_ids', ids)
-            for conf in mol.GetConformers():
-                conf.SetProp('matched_ids', ids)
-        mols = merge_confs({None: mols})   # return list of mols
-        mols = [remove_confs_rms(m) for m in mols]
-        for mol in mols:
-            for conf in mol.GetConformers():
-                conf.SetProp('parent_conf_id', 'None')
-        save_res(mols, res_db_fname)
-
-    mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
-
-    pharm_fd, pharm_fname = tempfile.mkstemp(suffix='_pharm.pkl', text=True)
-    with open(pharm_fname, 'wb') as f:
-        pickle.dump(p, f)
-
-    config_fd, config_fname = tempfile.mkstemp(suffix='_config.yml', text=True)
-    with open(config_fname, 'wt') as f:
-        yaml.safe_dump({'additional_features': args.additional_features,
-                        'max_mw': args.mw, 'max_tpsa': args.tpsa, 'max_rtb': args.rtb,
-                        'max_logp': args.logp, 'hash_db': args.hash_db,
-                        'hash_db_bin_step': args.hash_db_bin_step, 'crem_db': args.db,
-                        'radius': args.radius, 'max_replacements': args.max_replacements,
-                        'nconf': args.nconf, 'conf_gen': args.conf_gen, 'dist': args.dist,
-                        'exclusion_volume_dist': args.exclusion_volume, 'seed': args.seed,
-                        'output_dir': args.output, 'dask_num_workers': 0, 'ncpu': args.ncpu},
-                       f)
-
-    try:
-
-        while mol:
-
-            input_fd, input_fname = tempfile.mkstemp(suffix='_input.pkl', text=True)
-            with open(input_fname, 'wb') as f:
-                pickle.dump(mol, f)
-
-            output_fd, output_fname = tempfile.mkstemp(suffix='_output.pkl', text=True)
-            conf_count_fd, conf_count_fname = tempfile.mkstemp(suffix='_conf_count.txt', text=True)
-            debug_fd, debug_fname = tempfile.mkstemp(suffix='_debug.txt', text=True)
-
-            try:
-
-                dname = os.path.dirname(os.path.realpath(__file__))
-                python_exec = sys.executable
-                cmd = f'{python_exec} {os.path.join(dname, "expand_mol.py")} -i {input_fname} -o {output_fname} ' \
-                      f'-p {pharm_fname} --config {config_fname} --debug {debug_fname} --conf_count {conf_count_fname}'
-                start_time = timeit.default_timer()
-                subprocess.run(cmd, shell=True)
-                run_time = round(timeit.default_timer() - start_time, 1)
-
-                with open(output_fname, 'rb') as f:
-                    new_mols = pickle.load(f)
-
-                # new_mols, conf_mol_count, timings = expand_mol(mol=mol, pharmacophore=p,
-                #                                                additional_features=args.additional_features,
-                #                                                max_mw=args.mw, max_tpsa=args.tpsa, max_rtb=args.rtb,
-                #                                                max_logp=args.logp, hash_db=args.hash_db,
-                #                                                hash_db_bin_step=args.hash_db_bin_step, crem_db=args.db,
-                #                                                radius=args.radius, max_replacements=args.max_replacements,
-                #                                                nconf=args.nconf, conf_gen=args.conf_gen, dist=args.dist,
-                #                                                exclusion_volume_dist=args.exclusion_volume, seed=args.seed,
-                #                                                output_dir=args.output, dask_num_workers=0, ncpu=args.ncpu)
-
-                if new_mols:
-
-                    save_res(new_mols, res_db_fname)
-
-                    with open(conf_count_fname) as f:
-                        conf_mol_count = int(f.readline().strip())
-
-                    update_db(res_db_fname, int(mol.GetProp('_Name')), conf_mol_count)
-
-                print(f'===== {mol.GetProp("_Name")} =====')
-                with open(debug_fname) as f:
-                    print(''.join(f.readlines()))
-                sys.stdout.flush()
-
-            finally:
-
-                os.close(input_fd)
-                os.close(output_fd)
-                os.close(conf_count_fd)
-                os.close(debug_fd)
-                os.unlink(input_fname)
-                os.unlink(output_fname)
-                os.unlink(conf_count_fname)
-                os.unlink(debug_fname)
-
-            search_deep = True
-            if mol.GetProp('visited_ids').count(',') + 1 == p.get_num_features() or not new_mols:
-                search_deep = False
-            print('search deep: ', search_deep)
-            mol = choose_mol_to_grow(res_db_fname, p.get_num_features(), search_deep=search_deep)
-
-    finally:
-
-        os.close(pharm_fd)
-        os.close(config_fd)
-        os.unlink(pharm_fname)
-        os.unlink(config_fname)
+    with open(args.conf_count, 'wt') as f:
+        f.write(str(conf_count) + '\n')
 
 
 if __name__ == '__main__':
