@@ -32,6 +32,7 @@ from openbabel import pybel
 
 from pgrow import PharmModel2
 
+
 def gen_stereo(mol):
     stereo_opts = StereoEnumerationOptions(tryEmbedding=True, maxIsomers=32)
     for b in mol.GetBonds():
@@ -395,7 +396,6 @@ def get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
     mol = Chem.AddHs(mol)
 
-    # start = time.process_time()
     try:
         mol = __gen_confs(mol, Chem.RemoveHs(template_mol), nconf=nconfs, alg=conf_alg, seed=seed,
                           coreConfId=template_conf_id, ignoreSmoothingFailures=False)
@@ -406,28 +406,15 @@ def get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_
     if not mol:
         return template_conf_id, None
 
-    # print(f'__gen_conf: {mol.GetNumConformers()} confs, {time.process_time() - start}')
-    # start = time.process_time()
-
-    # mol = remove_confs_rms(mol)  # TODO: do we need this condition?
-
-    # print(f'remove_confs_rms: {mol.GetNumConformers()} confs, {time.process_time() - start}')
-    # start = time.process_time()
-
     mol = remove_confs_exclvol(mol, pharm.exclvol, evol)
     if not mol:
         return template_conf_id, None
-
-    # print(f'remove_confs_exclvol: {mol.GetNumConformers()} confs, {time.process_time() - start}')
-    # start = time.process_time()
 
     mol = remove_confs_match(mol,
                              pharm=pharm,
                              matched_ids=list(map(int, template_mol.GetConformer(template_conf_id).GetProp('matched_ids').split(','))),
                              new_ids=new_pids,
                              dist=dist)
-
-    # print(f'remove_confs_match: {mol.GetNumConformers() if mol else None} confs, {time.process_time() - start}')
 
     if not mol:
         return template_conf_id, None
@@ -624,13 +611,6 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
                     new_mols_dict[conf_id].append(m)
             pool.close()
 
-            # for m, template_conf_id in inputs:
-            #     conf_id, confs = get_confs(mol=m, template_conf_id=template_conf_id, template_mol=mol, nconfs=nconf,
-            #                                conf_alg=conf_gen, pharm=pharmacophore, new_pids=new_pids, dist=dist,
-            #                                evol=exclusion_volume_dist, seed=seed)
-            #     if confs:
-            #         new_mols[conf_id].append(confs)
-
     timings.append(f'conf generation: {sum(len(v) for v in new_mols_dict.values())} molecules, {round(timeit.default_timer() - start2, 4)}')
     start2 = timeit.default_timer()
 
@@ -666,8 +646,8 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
     start2 = timeit.default_timer()
 
     if len(new_mols) > 1:
-        with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}.pkl'), 'wb') as f:
-            pickle.dump(new_mols, f)
+        # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}.pkl'), 'wb') as f:
+        #     pickle.dump(new_mols, f)
         new_mols = select_mols(new_mols, ncpu=ncpu)
 
     timings.append(f'mol selection: {len(new_mols)} compounds, {round(timeit.default_timer() - start2, 4)}')
