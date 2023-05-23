@@ -38,7 +38,7 @@ from psearch.database import DB
 from read_input import read_input
 from openbabel import openbabel as ob
 from openbabel import pybel
-from dask.distributed import Client
+from dask.distributed import Client, as_completed
 from dask import bag
 
 
@@ -556,7 +556,8 @@ def create_db(db_fname):
                     "parent_conf_id INTEGER, "
                     "nmols INTEGER NOT NULL, "
                     "used INTEGER NOT NULL, "
-                    "priority INTEGER NOT NULL"
+                    "processing INTEGER NOT NULL, "
+                    "priority INTEGER NOT NULL, "
                     "time TEXT NOT NULL)")
         conn.commit()
 
@@ -592,9 +593,9 @@ def save_res(mols, parent_mol_id, db_fname):
 
         cur = conn.cursor()
 
-        # if parent_mol_id is not None:
-        #     cur.execute(f'UPDATE mols SET used = 1 WHERE id = {parent_mol_id}')
-        #     conn.commit()
+        if parent_mol_id is not None:
+            cur.execute(f'UPDATE mols SET used = 1, processing = 0 WHERE id = {parent_mol_id}')
+            conn.commit()
 
         if mols:
             cur.execute('SELECT MAX(id) FROM mols')
@@ -623,11 +624,11 @@ def save_res(mols, parent_mol_id, db_fname):
                         parent_conf_id = None
                     sql = 'INSERT INTO mols (id, conf_id, mol_block, matched_ids, visited_ids, ' \
                           '                  matched_ids_count, visited_ids_count, parent_mol_id, ' \
-                          '                  parent_conf_id, priority, used, nmols, time) ' \
-                          'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
+                          '                  parent_conf_id, priority, used, processing, nmols, time) ' \
+                          'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
                     cur.execute(sql, (mol_id, conf.GetId(), mol_block, matched_ids, visited_ids, matched_ids_count,
-                                      visited_ids_count, parent_mol_id, parent_conf_id, priority, 0, 0))
-                priority += 2
+                                      visited_ids_count, parent_mol_id, parent_conf_id, priority, 0, 0, 0))
+                priority += 3
             conn.commit()
 
 
@@ -1099,18 +1100,17 @@ def expand_mol_cli(mol, pharm_fname, config_fname):
     return int(mol.GetProp('_Name')), new_mols, conf_mol_count, debug
 
 
-def supply_mol(db_fname, max_features):
+def get_mol_to_expand(db_fname, max_features):
     with sqlite3.connect(db_fname) as conn:
         while True:
             cur = conn.cursor()
             cur.execute(f'SELECT id, MIN(priority) '
                         f'FROM mols '
-                        f'WHERE used = 0 AND visited_ids_count < {max_features}')
+                        f'WHERE used = 0 AND processing = 0 AND visited_ids_count < {max_features}')
             res = cur.fetchone()
-            if not res:
-                raise StopIteration
+            if res == (None, None):
+                return None
 
-            print('res', res)
             mol_id, priority = res
 
             cur.execute(f'SELECT id, conf_id, mol_block, matched_ids, visited_ids '
@@ -1129,10 +1129,9 @@ def supply_mol(db_fname, max_features):
                 m.GetConformer().SetProp('matched_ids', matched_ids)
                 mol.AddConformer(m.GetConformer(), assignId=False)
 
-            cur.execute(f'UPDATE mols SET used = 1 WHERE id = {mol_id}')
-            conn.commit()
+            cur.execute(f'UPDATE mols SET processing = 1 WHERE id = {mol_id}')
 
-            yield mol
+            return mol
 
 
 def main():
@@ -1191,11 +1190,9 @@ def main():
                              'passed as $PBS_NODEFILE variable from inside a PBS script. The first line in this file '
                              'will be the address of the scheduler running on the standard port 8786. If omitted, '
                              'calculations will run on a single machine as usual.')
-    parser.add_argument('-w', '--num_workers', metavar='INTEGER', required=False, type=int, default=100,
-                        help='the number of workers to be spawn by the dask cluster. For efficiency it seems that '
-                             'it should be equal to the total number of cores requested by the cluster. Default: 100.')
-    parser.add_argument('-m', '--nmol', metavar='INTEGER', required=False, type=int, default=1,
-                        help='number of molecules to expand simultaneously. Default: 1.')
+    parser.add_argument('-w', '--num_workers', metavar='INTEGER', required=False, type=int, default=1,
+                        help='the number of workers to be spawn by the dask cluster. This will limit the maximum '
+                             'number of processed molecules simultaneously. Default: 1.')
     parser.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
                         help='number of cpu cores to use per molecule. Default: 1.')
 
@@ -1206,6 +1203,8 @@ def main():
     if args.hostfile is not None:
         with open(args.hostfile) as f:
             dask_client = Client(f.readline().strip() + ':8786')
+    else:
+        dask_client = Client(n_workers=args.num_workers)
 
     if not os.path.isdir(args.output):
         os.makedirs(args.output, exist_ok=True)
@@ -1277,16 +1276,15 @@ def main():
                         'output_dir': args.output, 'dask_num_workers': 0, 'ncpu': args.ncpu},
                        f)
 
-    pool = Pool(args.nmol)
-
     try:
 
-        for parent_mol_id, new_mols, nmols, debug in pool.imap_unordered(partial(expand_mol_cli,
-                                                                                 pharm_fname=pharm_fname,
-                                                                                 config_fname=config_fname),
-                                                                         supply_mol(res_db_fname,
-                                                                                    p.get_num_features())):
-            # print(parent_mol_id, len(new_mols), debug)
+        futures = []
+        for _ in range(args.num_workers):
+            m = get_mol_to_expand(res_db_fname, p.get_num_features())
+            if m:
+                futures.append(dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname))
+        seq = as_completed(futures, with_results=True)
+        for i, (future, (parent_mol_id, new_mols, nmols, debug)) in enumerate(seq, 1):
             save_res(new_mols, parent_mol_id, res_db_fname)
             if nmols:
                 update_db(res_db_fname, parent_mol_id, nmols)
@@ -1294,6 +1292,29 @@ def main():
                 print(f'===== {parent_mol_id} =====')
                 print(debug)
                 sys.stdout.flush()
+            m = get_mol_to_expand(res_db_fname, p.get_num_features())
+            if m:
+                new_future = dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname)
+                seq.add(new_future)
+            del future
+
+    # pool = Pool(args.nmol)
+    #
+    # try:
+    #
+    #     for parent_mol_id, new_mols, nmols, debug in pool.imap_unordered(partial(expand_mol_cli,
+    #                                                                              pharm_fname=pharm_fname,
+    #                                                                              config_fname=config_fname),
+    #                                                                      get_mol_to_expand(res_db_fname,
+    #                                                                                        p.get_num_features())):
+    #         # print(parent_mol_id, len(new_mols), debug)
+    #         save_res(new_mols, parent_mol_id, res_db_fname)
+    #         if nmols:
+    #             update_db(res_db_fname, parent_mol_id, nmols)
+    #         if debug:
+    #             print(f'===== {parent_mol_id} =====')
+    #             print(debug)
+    #             sys.stdout.flush()
 
         #
         # while mol:
@@ -1356,7 +1377,7 @@ def main():
         os.close(config_fd)
         os.unlink(pharm_fname)
         os.unlink(config_fname)
-        pool.close()
+        # pool.close()
 
 
 if __name__ == '__main__':

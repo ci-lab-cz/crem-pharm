@@ -666,8 +666,8 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
     start2 = timeit.default_timer()
 
     if len(new_mols) > 1:
-        with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}.pkl'), 'wb') as f:
-            pickle.dump(new_mols, f)
+        # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}.pkl'), 'wb') as f:
+        #     pickle.dump(new_mols, f)
         new_mols = select_mols(new_mols, ncpu=ncpu)
 
     timings.append(f'mol selection: {len(new_mols)} compounds, {round(timeit.default_timer() - start2, 4)}')
