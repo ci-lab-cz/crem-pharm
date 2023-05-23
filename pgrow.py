@@ -754,7 +754,6 @@ def get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
     mol = Chem.AddHs(mol)
 
-    # start = time.process_time()
     try:
         mol = __gen_confs(mol, Chem.RemoveHs(template_mol), nconf=nconfs, alg=conf_alg, seed=seed,
                           coreConfId=template_conf_id, ignoreSmoothingFailures=False)
@@ -765,20 +764,9 @@ def get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_
     if not mol:
         return template_conf_id, None
 
-    # print(f'__gen_conf: {mol.GetNumConformers()} confs, {time.process_time() - start}')
-    # start = time.process_time()
-
-    # mol = remove_confs_rms(mol)  # TODO: do we need this condition?
-
-    # print(f'remove_confs_rms: {mol.GetNumConformers()} confs, {time.process_time() - start}')
-    # start = time.process_time()
-
     mol = remove_confs_exclvol(mol, pharm.exclvol, evol)
     if not mol:
         return template_conf_id, None
-
-    # print(f'remove_confs_exclvol: {mol.GetNumConformers()} confs, {time.process_time() - start}')
-    # start = time.process_time()
 
     mol = remove_confs_match(mol,
                              pharm=pharm,
@@ -786,14 +774,13 @@ def get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_
                              new_ids=new_pids,
                              dist=dist)
 
-    # print(f'remove_confs_match: {mol.GetNumConformers() if mol else None} confs, {time.process_time() - start}')
-
     if not mol:
         return template_conf_id, None
 
     mol.SetProp('visited_ids', template_mol.GetProp('visited_ids') + ',' + ','.join(map(str, new_pids)))
     for conf in mol.GetConformers():
         conf.SetProp('parent_conf_id', str(template_conf_id))
+
     return template_conf_id, mol
 
 
@@ -983,13 +970,6 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
                     new_mols_dict[conf_id].append(m)
             pool.close()
 
-            # for m, template_conf_id in inputs:
-            #     conf_id, confs = get_confs(mol=m, template_conf_id=template_conf_id, template_mol=mol, nconfs=nconf,
-            #                                conf_alg=conf_gen, pharm=pharmacophore, new_pids=new_pids, dist=dist,
-            #                                evol=exclusion_volume_dist, seed=seed)
-            #     if confs:
-            #         new_mols[conf_id].append(confs)
-
     timings.append(f'conf generation: {sum(len(v) for v in new_mols_dict.values())} molecules, {round(timeit.default_timer() - start2, 4)}')
     start2 = timeit.default_timer()
 
@@ -1087,9 +1067,6 @@ def main():
                         help='database with 3D pharmacophore hashes for additional filtering of fragments for growing.')
     parser.add_argument('--hash_db_bin_step', metavar='NUMERIC', required=False, default=1, type=float,
                         help='bin step used to create 3D pharmacophore hashes.')
-    # parser.add_argument('--hash_db_directed', required=False, default=False, action='store_true',
-    #                     help='if set direction of attachment points will be considered during calculation of '
-    #                          '3D pharmacophore hashes.')
     parser.add_argument('-u', '--hostfile', metavar='FILENAME', required=False, type=str, default=None,
                         help='text file with addresses of nodes of dask SSH cluster. The most typical, it can be '
                              'passed as $PBS_NODEFILE variable from inside a PBS script. The first line in this file '
@@ -1197,22 +1174,12 @@ def main():
                 python_exec = sys.executable
                 cmd = f'{python_exec} {os.path.join(dname, "expand_mol.py")} -i {input_fname} -o {output_fname} ' \
                       f'-p {pharm_fname} --config {config_fname} --debug {debug_fname} --conf_count {conf_count_fname}'
-                start_time = timeit.default_timer()
+                # start_time = timeit.default_timer()
                 subprocess.run(cmd, shell=True)
-                run_time = round(timeit.default_timer() - start_time, 1)
+                # run_time = round(timeit.default_timer() - start_time, 1)
 
                 with open(output_fname, 'rb') as f:
                     new_mols = pickle.load(f)
-
-                # new_mols, conf_mol_count, timings = expand_mol(mol=mol, pharmacophore=p,
-                #                                                additional_features=args.additional_features,
-                #                                                max_mw=args.mw, max_tpsa=args.tpsa, max_rtb=args.rtb,
-                #                                                max_logp=args.logp, hash_db=args.hash_db,
-                #                                                hash_db_bin_step=args.hash_db_bin_step, crem_db=args.db,
-                #                                                radius=args.radius, max_replacements=args.max_replacements,
-                #                                                nconf=args.nconf, conf_gen=args.conf_gen, dist=args.dist,
-                #                                                exclusion_volume_dist=args.exclusion_volume, seed=args.seed,
-                #                                                output_dir=args.output, dask_num_workers=0, ncpu=args.ncpu)
 
                 if new_mols:
 
