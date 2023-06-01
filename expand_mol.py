@@ -640,9 +640,11 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
 
     if new_mols:
         new_mols = merge_confs(new_mols_dict)  # return list of mols
-        with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}.pkl'), 'wb') as f:
-            pickle.dump(new_mols, f)
+        with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}-before.pkl'), 'wb') as f:
+            pickle.dump(new_mols, f, protocol=3)
         new_mols = [remove_confs_rms(m, rms=0.25) for m in new_mols]
+        with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}-after.pkl'), 'wb') as f:
+            pickle.dump(new_mols, f, protocol=3)
 
     timings.append(f'merge confs and remove by rms: {len(new_mols)} compounds, {round(timeit.default_timer() - start2, 4)}')
     start2 = timeit.default_timer()
