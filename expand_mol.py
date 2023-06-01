@@ -30,7 +30,7 @@ from pmapper.pharmacophore import Pharmacophore as P
 from openbabel import openbabel as ob
 from openbabel import pybel
 
-from pgrow import PharmModel2
+from pharm_class import PharmModel2
 
 
 def gen_stereo(mol):
