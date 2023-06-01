@@ -186,9 +186,9 @@ def remove_confs_rms(mol, rms=0.25):
     for i, j in combinations(cids, 2):
         best_rms = float('inf')
         for ids in match_ids:
-            rms = np.sqrt(np.mean(np.sum((mol_tmp.GetConformer(i).GetPositions() - mol_tmp.GetConformer(j).GetPositions()[ids, ]) ** 2, axis=1)))
-            if rms < best_rms:
-                best_rms = rms
+            rms_calc = np.sqrt(np.mean(np.sum((mol_tmp.GetConformer(i).GetPositions() - mol_tmp.GetConformer(j).GetPositions()[ids, ]) ** 2, axis=1)))
+            if rms_calc < best_rms:
+                best_rms = rms_calc
         rms_list.append((i, j, best_rms))
 
     while any(item[2] < rms for item in rms_list):
