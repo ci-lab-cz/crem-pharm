@@ -400,6 +400,11 @@ def remove_confs_match(mol, pharm, matched_ids, new_ids, dist):
         return mol
 
 
+def get_confs_mp(items, template_mol, nconfs, conf_alg, pharm, new_pids, dist, evol, seed):
+    mol, template_conf_id = items
+    return get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_pids, dist, evol, seed)
+
+
 def get_confs(mol, template_conf_id, template_mol, nconfs, conf_alg, pharm, new_pids, dist, evol, seed):
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
@@ -606,16 +611,16 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
                     new_mols_dict[conf_id].append(m)
         else:
             pool = Pool(ncpu)
-            for conf_id, m in pool.starmap(partial(get_confs,
-                                                   template_mol=mol,
-                                                   nconfs=nconf,
-                                                   conf_alg=conf_gen,
-                                                   pharm=pharmacophore,
-                                                   new_pids=new_pids,
-                                                   dist=dist,
-                                                   evol=exclusion_volume_dist,
-                                                   seed=seed),
-                                           inputs):
+            for conf_id, m in pool.imap_unordered(partial(get_confs_mp,
+                                                          template_mol=mol,
+                                                          nconfs=nconf,
+                                                          conf_alg=conf_gen,
+                                                          pharm=pharmacophore,
+                                                          new_pids=new_pids,
+                                                          dist=dist,
+                                                          evol=exclusion_volume_dist,
+                                                          seed=seed),
+                                                  inputs):
                 if m:
                     new_mols_dict[conf_id].append(m)
             pool.close()
