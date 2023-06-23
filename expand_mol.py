@@ -300,10 +300,23 @@ def select_mols(mols, ncpu=1):
     return output
 
 
-def merge_confs(mols_dict):
+def combine_conformers(mols):
+    mol = Chem.Mol(mols[0])
+    for m in mols[1:]:
+        ids = mol.GetSubstructMatch(m, useChirality=True)
+        for c in m.GetConformers():
+            pos = c.GetPositions()
+            for query_id, atom_id in enumerate(ids):
+                x, y, z = pos[query_id,]
+                c.SetAtomPosition(atom_id, Point3D(x, y, z))
+            mol.AddConformer(c, assignId=True)
+    return mol
+
+
+def merge_confs(mols_dict, ncpu=1):
     # mols_dict - dict {parent_conf_id: [mol1, mol2, ...], ...}
     # molecules with identical smiles are combined into one with multiple conformers
-    smiles = dict()  # {smi: Mol, ...}
+    smiles = defaultdict(list)  # {smi: [Mol], ...}
     for parent_conf_id, mols in mols_dict.items():
         for mol in mols:
             visited_ids = mol.GetProp('visited_ids')
@@ -311,18 +324,14 @@ def merge_confs(mols_dict):
                 # c.SetProp('parent_conf_id', str(parent_conf_id))
                 c.SetProp('visited_ids', visited_ids)
             smi = Chem.MolToSmiles(mol, isomericSmiles=True)
-            if smi not in smiles:
-                smiles[smi] = Chem.Mol(mol)
-            else:
-                # atoms of additional conformers are renumbered according to already stored structure
-                ids = smiles[smi].GetSubstructMatch(mol, useChirality=True)
-                for c in mol.GetConformers():
-                    pos = c.GetPositions()
-                    for query_id, atom_id in enumerate(ids):
-                        x, y, z = pos[query_id,]
-                        c.SetAtomPosition(atom_id, Point3D(x, y, z))
-                    smiles[smi].AddConformer(c, assignId=True)
-    return list(smiles.values())
+            smiles[smi].append(mol)
+
+    pool = Pool(ncpu)
+    try:
+        mols = list(pool.imap_unordered(combine_conformers, smiles.values()))
+    finally:
+        pool.close()
+    return mols
 
 
 def remove_confs_exclvol(mol, exclvol_xyz, threshold):
@@ -639,7 +648,7 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
     start2 = timeit.default_timer()
 
     if new_mols:
-        new_mols = merge_confs(new_mols_dict)  # return list of mols
+        new_mols = merge_confs(new_mols_dict, ncpu=ncpu)  # return list of mols
         # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}-before.pkl'), 'wb') as f:
         #     pickle.dump(new_mols, f, protocol=3)
         new_mols = [remove_confs_rms(m) for m in new_mols]

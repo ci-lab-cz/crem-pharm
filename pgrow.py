@@ -1035,7 +1035,7 @@ def main():
             mol.SetProp('visited_ids', ids)
             for conf in mol.GetConformers():
                 conf.SetProp('matched_ids', ids)
-        mols = merge_confs({None: mols})   # return list of mols
+        mols = merge_confs({None: mols}, ncpu=args.ncpu)   # return list of mols
         mols = [remove_confs_rms(m) for m in mols]
         for mol in mols:
             for conf in mol.GetConformers():
