@@ -457,7 +457,7 @@ def remove_mols_by_property(mols, max_mw, max_tpsa, max_rtb, max_logp):
     :param max_tpsa:
     :param max_rtb:
     :param max_logp:
-    :return:
+    :return: list of 2-tuple (smi, mol)
     """
     output = []
     for smi, mol in mols:
@@ -555,7 +555,7 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
 
     new_mols = list(grow_mol(mol, crem_db, radius=radius, min_atoms=1, max_atoms=12,
                              max_replacements=max_replacements, replace_ids=atom_ids, return_mol=True,
-                             ncores=1,
+                             ncores=4,
                              filter_func=partial(filter_by_hashes, db_hashes=hash_db, hashes=hashes) if use_hash_db else None,
                              **kwargs))
 
