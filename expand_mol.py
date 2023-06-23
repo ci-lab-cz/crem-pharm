@@ -651,7 +651,11 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
         new_mols = merge_confs(new_mols_dict, ncpu=ncpu)  # return list of mols
         # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}-before.pkl'), 'wb') as f:
         #     pickle.dump(new_mols, f, protocol=3)
-        new_mols = [remove_confs_rms(m) for m in new_mols]
+        pool = Pool(ncpu)
+        try:
+            new_mols = list(pool.imap_unordered(remove_confs_rms, new_mols))
+        finally:
+            pool.close()
         # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}-after.pkl'), 'wb') as f:
         #     pickle.dump(new_mols, f, protocol=3)
 
