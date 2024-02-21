@@ -12,7 +12,6 @@ from itertools import combinations, product
 from operator import itemgetter
 import numpy as np
 import pandas as pd
-import pprint
 import re
 import sqlite3
 import subprocess
@@ -20,7 +19,7 @@ import tempfile
 import timeit
 import yaml
 
-from dask import bag
+#from dask import bag
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolDescriptors
 from rdkit.Chem.Crippen import MolLogP
