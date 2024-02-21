@@ -12,7 +12,11 @@ from itertools import combinations, product
 from operator import itemgetter
 import numpy as np
 import pandas as pd
+import pprint
+import re
 import sqlite3
+import subprocess
+import tempfile
 import timeit
 import yaml
 
@@ -542,12 +546,112 @@ def enumerate_hashes_directed(mol, att_ids, feature_positions, bin_step, directe
     return output_hashes
 
 
+def read_multi_conf_sdf(fname):
+    output = dict()
+    for mol in Chem.SDMolSupplier(fname):
+        if mol:
+            mol_name = mol.GetProp('_Name')
+            if mol_name not in output:
+                output[mol_name] = mol
+            else:
+                output[mol_name].AddConformer(mol.GetConformer(), assignId=True)
+    return list(output.values())
+
+
+def gen_confs_cdpkit(mols, template_mol, nconf, ncpu):
+    """
+
+    :param mols: list of RDKit Mol
+    :param template_mol: RDKit Mol
+    :param nconf:
+    :param ncpu:
+    :return: list of multi-conf RDKit Mol
+    """
+
+    # import CDPL.Chem as CDPLChem
+    # import CDPL.Base as CDPLBase
+    # from io import BytesIO, StringIO
+
+    # sio = StringIO()
+    # w = Chem.SDWriter(sio)
+    # for m in mols:
+    #     w.write(m)
+    # w.close()
+    # sio.seek(0)
+
+    input_fd, input_fname = tempfile.mkstemp(suffix='_input.sdf', text=True)
+    template_fd, template_fname = tempfile.mkstemp(suffix='_template.mol', text=True)
+    output_fd, output_fname = tempfile.mkstemp(suffix='_output.sdf', text=True)
+
+    try:
+
+        w = Chem.SDWriter(input_fname)
+        for mol in mols:
+            w.write(mol)
+        w.close()
+
+        with open(template_fname, 'wt') as f:
+            f.write(Chem.MolToMolBlock(template_mol))
+
+        cmd = (f'confgen -i {input_fname} -o {output_fname} -j {template_fname} -n {nconf} -t {ncpu} '
+               f'-a -m systematic --progress 0 > /dev/null 2>/dev/null')
+        subprocess.run(cmd, shell=True)
+        output = read_multi_conf_sdf(output_fname)
+
+    finally:
+        os.close(input_fd)
+        os.close(template_fd)
+        os.close(output_fd)
+        os.unlink(input_fname)
+        os.unlink(template_fname)
+        os.unlink(output_fname)
+
+    return output
+
+
+def filter_confs_mp(items, template_mol, pharm, evol, dist, new_pids):
+    return filter_confs(*items, template_mol, pharm, evol, dist, new_pids)
+
+
+def filter_confs(mol, template_conf_id, template_mol, pharm, evol, dist, new_pids):
+
+    try:
+
+        mol = remove_confs_exclvol(mol, pharm.exclvol, evol)
+        if not mol:
+            return template_conf_id, None
+
+        mol = remove_confs_match(mol,
+                                 pharm=pharm,
+                                 matched_ids=list(map(int, template_mol.GetConformer(template_conf_id).GetProp('matched_ids').split(','))),
+                                 new_ids=new_pids,
+                                 dist=dist)
+        if not mol:
+            return template_conf_id, None
+
+        mol.SetProp('visited_ids', template_mol.GetProp('visited_ids') + ',' + ','.join(map(str, new_pids)))
+        for conf in mol.GetConformers():
+            conf.SetProp('parent_conf_id', str(template_conf_id))
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+
+    return template_conf_id, mol
+
+
 def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rtb, max_logp, hash_db, hash_db_bin_step,
                crem_db, radius, max_replacements, nconf, conf_gen, dist, exclusion_volume_dist, seed,
                output_dir, dask_num_workers=0, ncpu=1):
 
     timings = []
     start = timeit.default_timer()
+
+    # with open('/home/pavel/python/crem-pharm/test/test1/output/mol_expand_test_obj.pkl', 'wb') as f:
+    #     for item in (mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rtb, max_logp, hash_db, hash_db_bin_step,
+    #            crem_db, radius, max_replacements, nconf, conf_gen, dist, exclusion_volume_dist, seed,
+    #            output_dir, dask_num_workers, ncpu):
+    #         pickle.dump(item, f)
 
     new_pids = pharmacophore.select_nearest_cluster(tuple(map(int, mol.GetProp('visited_ids').split(','))))
     atom_ids = get_grow_atom_ids(mol, pharmacophore.get_xyz(new_pids))
@@ -594,38 +698,60 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
 
     if new_isomers:
 
-        inputs = [(new_isomer, conf.GetId()) for new_isomer, conf in product(new_isomers, mol.GetConformers())]
+        # create a list of input mols where names are ConfId of a parent mol
+        inputs = []
+        for i, (new_isomer, conf) in enumerate(product(new_isomers, mol.GetConformers())):
+            new_isomer.SetProp('_Name', f'{i}_{conf.GetId()}')
+            inputs.append(new_isomer)
 
-        if dask_num_workers:
-            b = bag.from_sequence(inputs, npartitions=dask_num_workers * 2)
-            for conf_id, m in b.starmap(get_confs,
-                                        template_mol=mol,
-                                        nconfs=nconf,
-                                        conf_alg=conf_gen,
-                                        pharm=pharmacophore,
-                                        new_pids=new_pids,
-                                        dist=dist,
-                                        evol=exclusion_volume_dist,
-                                        seed=seed).compute():
-                if m:
-                    new_mols_dict[conf_id].append(m)
-        else:
-            pool = Pool(ncpu)
-            for conf_id, m in pool.imap_unordered(partial(get_confs_mp,
-                                                          template_mol=mol,
-                                                          nconfs=nconf,
-                                                          conf_alg=conf_gen,
-                                                          pharm=pharmacophore,
-                                                          new_pids=new_pids,
-                                                          dist=dist,
-                                                          evol=exclusion_volume_dist,
-                                                          seed=seed),
-                                                  inputs):
-                if m:
-                    new_mols_dict[conf_id].append(m)
-            pool.close()
+        new_mols = gen_confs_cdpkit(inputs, template_mol=mol, nconf=nconf, ncpu=ncpu)
 
-    timings.append(f'conf generation: {sum(len(v) for v in new_mols_dict.values())} molecules, {round(timeit.default_timer() - start2, 4)}')
+        timings.append(f'conf generation: {len(new_mols)} molecules, {round(timeit.default_timer() - start2, 4)}')
+        start2 = timeit.default_timer()
+
+        inputs = [(m1, int(re.findall(r'_(.*)$', m1.GetProp('_Name'))[0])) for m1 in new_mols]
+
+        pool = Pool(ncpu)
+        for conf_id, m in pool.imap_unordered(partial(filter_confs_mp,
+                                                      template_mol=mol,
+                                                      pharm=pharmacophore,
+                                                      new_pids=new_pids,
+                                                      dist=dist,
+                                                      evol=exclusion_volume_dist),
+                                              inputs):
+            if m:
+                new_mols_dict[conf_id].append(m)
+
+        # if dask_num_workers:
+        #     b = bag.from_sequence(inputs, npartitions=dask_num_workers * 2)
+        #     for conf_id, m in b.starmap(get_confs,
+        #                                 template_mol=mol,
+        #                                 nconfs=nconf,
+        #                                 conf_alg=conf_gen,
+        #                                 pharm=pharmacophore,
+        #                                 new_pids=new_pids,
+        #                                 dist=dist,
+        #                                 evol=exclusion_volume_dist,
+        #                                 seed=seed).compute():
+        #         if m:
+        #             new_mols_dict[conf_id].append(m)
+        # else:
+        #     pool = Pool(ncpu)
+        #     for conf_id, m in pool.imap_unordered(partial(get_confs_mp,
+        #                                                   template_mol=mol,
+        #                                                   nconfs=nconf,
+        #                                                   conf_alg=conf_gen,
+        #                                                   pharm=pharmacophore,
+        #                                                   new_pids=new_pids,
+        #                                                   dist=dist,
+        #                                                   evol=exclusion_volume_dist,
+        #                                                   seed=seed),
+        #                                           inputs):
+        #         if m:
+        #             new_mols_dict[conf_id].append(m)
+        #     pool.close()
+
+    timings.append(f'conf filtration: {sum(len(v) for v in new_mols_dict.values())} molecules, {round(timeit.default_timer() - start2, 4)}')
     start2 = timeit.default_timer()
 
     if new_mols_dict:
@@ -652,7 +778,7 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
     timings.append(f'conf filtering: {sum(len(v) for v in new_mols_dict.values())} compounds, {round(timeit.default_timer() - start2, 4)}')
     start2 = timeit.default_timer()
 
-    if new_mols:
+    if new_mols_dict:
         new_mols = merge_confs(new_mols_dict, ncpu=ncpu)  # return list of mols
         # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}-before.pkl'), 'wb') as f:
         #     pickle.dump(new_mols, f, protocol=3)
@@ -663,11 +789,13 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
             pool.close()
         # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}-after.pkl'), 'wb') as f:
         #     pickle.dump(new_mols, f, protocol=3)
+    else:
+        new_mols = []
 
     timings.append(f'merge confs and remove by rms: {len(new_mols)} compounds, {round(timeit.default_timer() - start2, 4)}')
     start2 = timeit.default_timer()
 
-    if len(new_mols) > 1:
+    if new_mols:
         # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}.pkl'), 'wb') as f:
         #     pickle.dump(new_mols, f)
         new_mols = select_mols(new_mols, ncpu=ncpu)
@@ -699,6 +827,9 @@ def main():
                         help='text file with some additional information.')
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+
+    # import pydevd_pycharm
+    # pydevd_pycharm.settrace('localhost', port=12345, stdoutToServer=True, stderrToServer=True)
 
     args = parser.parse_args()
 
