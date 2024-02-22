@@ -21,7 +21,7 @@ from rdkit.Chem import AllChem
 from pmapper.pharmacophore import Pharmacophore as P
 from psearch.database import DB
 from read_input import read_input
-from dask.distributed import Client
+from dask.distributed import Client, as_completed
 
 from expand_mol import remove_confs_exclvol, select_mols, merge_confs, remove_confs_rms
 from pharm_class import PharmModel2
@@ -172,6 +172,8 @@ def create_db(db_fname):
                     "parent_conf_id INTEGER, "
                     "nmols INTEGER NOT NULL, "
                     "used INTEGER NOT NULL, "
+                    "processing INTEGER NOT NULL, "
+                    "priority INTEGER NOT NULL, "
                     "time TEXT NOT NULL)")
         conn.commit()
 
@@ -180,27 +182,44 @@ def save_res(mols, db_fname):
 
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
-        cur.execute('SELECT MAX(id) FROM mols')
-        mol_id = cur.fetchone()[0]
-        if mol_id is None:
-            mol_id = 0
-        for mol in mols:
-            parent_mol_id = mol.GetPropsAsDict().get('parent_mol_id', None)
-            mol_id += 1
-            mol.SetProp('_Name', str(mol_id))
-            for conf in mol.GetConformers():
-                mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
-                visited_ids = conf.GetProp('visited_ids')
-                visited_ids_count = visited_ids.count(',') + 1
-                matched_ids = conf.GetProp('matched_ids')
-                matched_ids_count = matched_ids.count(',') + 1
-                parent_conf_id = conf.GetProp('parent_conf_id')
-                if parent_conf_id == 'None':
-                    parent_conf_id = None
-                sql = 'INSERT INTO mols VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
-                cur.execute(sql, (mol_id, conf.GetId(), mol_block, matched_ids, visited_ids, matched_ids_count,
-                                  visited_ids_count, parent_mol_id, parent_conf_id, 0, 0))
-        conn.commit()
+
+        if parent_mol_id is not None:
+            cur.execute(f'UPDATE mols SET used = 1, processing = 0 WHERE id = {parent_mol_id}')
+            conn.commit()
+
+        if mols:
+            cur.execute('SELECT MAX(id) FROM mols')
+            mol_id = cur.fetchone()[0]
+            if mol_id is None:
+                mol_id = 0
+            parent_mol_id = mols[0].GetPropsAsDict().get('parent_mol_id', None)
+            if parent_mol_id is not None:
+                cur.execute(f'SELECT distinct(priority) FROM mols where id = {parent_mol_id}')
+                parent_priority = cur.fetchone()[0]
+                priority = parent_priority + 1
+            else:
+                priority = 1
+            for mol in mols:
+                parent_mol_id = mol.GetPropsAsDict().get('parent_mol_id', None)
+                mol_id += 1
+                mol.SetProp('_Name', str(mol_id))
+                for conf in mol.GetConformers():
+                    mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
+                    visited_ids = conf.GetProp('visited_ids')
+                    visited_ids_count = visited_ids.count(',') + 1
+                    matched_ids = conf.GetProp('matched_ids')
+                    matched_ids_count = matched_ids.count(',') + 1
+                    parent_conf_id = conf.GetProp('parent_conf_id')
+                    if parent_conf_id == 'None':
+                        parent_conf_id = None
+                    sql = 'INSERT INTO mols (id, conf_id, mol_block, matched_ids, visited_ids, ' \
+                          '                  matched_ids_count, visited_ids_count, parent_mol_id, ' \
+                          '                  parent_conf_id, priority, used, processing, nmols, time) ' \
+                          'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
+                    cur.execute(sql, (mol_id, conf.GetId(), mol_block, matched_ids, visited_ids, matched_ids_count,
+                                      visited_ids_count, parent_mol_id, parent_conf_id, priority, 0, 0, 0))
+                priority += 3
+            conn.commit()
 
 
 def update_db(db_fname, mol_id, nmols):
@@ -327,11 +346,11 @@ def main():
                              'passed as $PBS_NODEFILE variable from inside a PBS script. The first line in this file '
                              'will be the address of the scheduler running on the standard port 8786. If omitted, '
                              'calculations will run on a single machine as usual.')
-    parser.add_argument('-w', '--num_workers', metavar='INTEGER', required=False, type=int, default=100,
-                        help='the number of workers to be spawn by the dask cluster. For efficiency it seems that '
-                             'it should be equal to the total number of cores requested by the cluster. Default: 100.')
+    parser.add_argument('-w', '--num_workers', metavar='INTEGER', required=False, type=int, default=1,
+                        help='the number of workers to be spawn by the dask cluster. This will limit the maximum '
+                             'number of processed molecules simultaneously. Default: 1.')
     parser.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
-                        help='number of cpu cores to use. Default: 1.')
+                        help='number of cpu cores to use per molecule. Default: 1.')
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 
@@ -340,6 +359,8 @@ def main():
     if args.hostfile is not None:
         with open(args.hostfile) as f:
             dask_client = Client(f.readline().strip() + ':8786')
+    else:
+        dask_client = Client(n_workers=args.num_workers)
 
     if not os.path.isdir(args.output):
         os.makedirs(args.output, exist_ok=True)
@@ -386,14 +407,14 @@ def main():
             mol.SetProp('visited_ids', ids)
             for conf in mol.GetConformers():
                 conf.SetProp('matched_ids', ids)
-        mols = merge_confs({None: mols}, ncpu=args.ncpu)   # return list of mols
+        mols = merge_confs({None: mols})   # return list of mols
         mols = [remove_confs_rms(m) for m in mols]
         for mol in mols:
             for conf in mol.GetConformers():
                 conf.SetProp('parent_conf_id', 'None')
-        save_res(mols, res_db_fname)
+        save_res(mols, None, res_db_fname)
 
-    mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
+    # mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
 
     pharm_fd, pharm_fname = tempfile.mkstemp(suffix='_pharm.pkl', text=True)
     with open(pharm_fname, 'wb') as f:
@@ -413,59 +434,25 @@ def main():
 
     try:
 
-        while mol:
-
-            input_fd, input_fname = tempfile.mkstemp(suffix='_input.pkl', text=True)
-            with open(input_fname, 'wb') as f:
-                pickle.dump(mol, f)
-
-            output_fd, output_fname = tempfile.mkstemp(suffix='_output.pkl', text=True)
-            conf_count_fd, conf_count_fname = tempfile.mkstemp(suffix='_conf_count.txt', text=True)
-            debug_fd, debug_fname = tempfile.mkstemp(suffix='_debug.txt', text=True)
-
-            try:
-
-                dname = os.path.dirname(os.path.realpath(__file__))
-                python_exec = sys.executable
-                cmd = f'{python_exec} {os.path.join(dname, "expand_mol.py")} -i {input_fname} -o {output_fname} ' \
-                      f'-p {pharm_fname} --config {config_fname} --debug {debug_fname} --conf_count {conf_count_fname}'
-                # start_time = timeit.default_timer()
-                subprocess.run(cmd, shell=True)
-                # run_time = round(timeit.default_timer() - start_time, 1)
-
-                with open(output_fname, 'rb') as f:
-                    new_mols = pickle.load(f)
-
-                if new_mols:
-
-                    save_res(new_mols, res_db_fname)
-
-                    with open(conf_count_fname) as f:
-                        conf_mol_count = int(f.readline().strip())
-
-                    update_db(res_db_fname, int(mol.GetProp('_Name')), conf_mol_count)
-
-                print(f'===== {mol.GetProp("_Name")} =====')
-                with open(debug_fname) as f:
-                    print(''.join(f.readlines()))
+        futures = []
+        for _ in range(args.num_workers):
+            m = get_mol_to_expand(res_db_fname, p.get_num_features())
+            if m:
+                futures.append(dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname))
+        seq = as_completed(futures, with_results=True)
+        for i, (future, (parent_mol_id, new_mols, nmols, debug)) in enumerate(seq, 1):
+            save_res(new_mols, parent_mol_id, res_db_fname)
+            if nmols:
+                update_db(res_db_fname, parent_mol_id, nmols)
+            if debug:
+                print(f'===== {parent_mol_id} =====')
+                print(debug)
                 sys.stdout.flush()
-
-            finally:
-
-                os.close(input_fd)
-                os.close(output_fd)
-                os.close(conf_count_fd)
-                os.close(debug_fd)
-                os.unlink(input_fname)
-                os.unlink(output_fname)
-                os.unlink(conf_count_fname)
-                os.unlink(debug_fname)
-
-            search_deep = True
-            if mol.GetProp('visited_ids').count(',') + 1 == p.get_num_features() or not new_mols:
-                search_deep = False
-            print('search deep: ', search_deep)
-            mol = choose_mol_to_grow(res_db_fname, p.get_num_features(), search_deep=search_deep)
+            m = get_mol_to_expand(res_db_fname, p.get_num_features())
+            if m:
+                new_future = dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname)
+                seq.add(new_future)
+            del future
 
     finally:
 
