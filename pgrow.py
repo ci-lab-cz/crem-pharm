@@ -510,8 +510,9 @@ def main():
 
     try:
 
+        max_tasks = 2 * args.num_workers
         futures = []
-        for _ in range(args.num_workers):
+        for _ in range(max_tasks):
             m = get_mol_to_expand(res_db_fname, p.get_num_features())
             if m:
                 futures.append(dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname))
@@ -524,11 +525,12 @@ def main():
                 print(f'===== {parent_mol_id} =====')
                 print(debug)
                 sys.stdout.flush()
-            m = get_mol_to_expand(res_db_fname, p.get_num_features())
-            if m:
-                new_future = dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname)
-                seq.add(new_future)
             del future
+            for _ in range(max_tasks - seq.count()):
+                m = get_mol_to_expand(res_db_fname, p.get_num_features())
+                if m:
+                    new_future = dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname)
+                    seq.add(new_future)
 
     finally:
 
