@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import tempfile
 import timeit
+import traceback
 import yaml
 
 #from dask import bag
@@ -547,13 +548,16 @@ def enumerate_hashes_directed(mol, att_ids, feature_positions, bin_step, directe
 
 def read_multi_conf_sdf(fname):
     output = dict()
-    for mol in Chem.SDMolSupplier(fname):
-        if mol:
-            mol_name = mol.GetProp('_Name')
-            if mol_name not in output:
-                output[mol_name] = mol
-            else:
-                output[mol_name].AddConformer(mol.GetConformer(), assignId=True)
+    try:
+        for mol in Chem.SDMolSupplier(fname):
+            if mol:
+                mol_name = mol.GetProp('_Name')
+                if mol_name not in output:
+                    output[mol_name] = mol
+                else:
+                    output[mol_name].AddConformer(mol.GetConformer(), assignId=True)
+    except Exception:
+        traceback.print_exc()
     return list(output.values())
 
 
@@ -632,8 +636,7 @@ def filter_confs(mol, template_conf_id, template_mol, pharm, evol, dist, new_pid
         for conf in mol.GetConformers():
             conf.SetProp('parent_conf_id', str(template_conf_id))
 
-    except Exception as e:
-        import traceback
+    except Exception:
         print(traceback.format_exc())
 
     return template_conf_id, mol
