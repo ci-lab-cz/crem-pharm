@@ -178,7 +178,7 @@ def create_db(db_fname):
         conn.commit()
 
 
-def save_res(mols, db_fname):
+def save_res(mols, parent_mol_id, db_fname):
 
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
@@ -291,6 +291,82 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
         conn.commit()
 
         return mol
+
+
+def expand_mol_cli(mol, pharm_fname, config_fname):
+
+    input_fd, input_fname = tempfile.mkstemp(suffix='_input.pkl', text=True)
+    with open(input_fname, 'wb') as f:
+        pickle.dump(mol, f)
+
+    output_fd, output_fname = tempfile.mkstemp(suffix='_output.pkl', text=True)
+    conf_count_fd, conf_count_fname = tempfile.mkstemp(suffix='_conf_count.txt', text=True)
+    debug_fd, debug_fname = tempfile.mkstemp(suffix='_debug.txt', text=True)
+
+    try:
+        dname = os.path.dirname(os.path.realpath(__file__))
+        python_exec = sys.executable
+        cmd = f'{python_exec} {os.path.join(dname, "expand_mol.py")} -i {input_fname} -o {output_fname} ' \
+              f'-p {pharm_fname} --config {config_fname} --debug {debug_fname} --conf_count {conf_count_fname}'
+        # start_time = timeit.default_timer()
+        subprocess.run(cmd, shell=True)
+        # run_time = round(timeit.default_timer() - start_time, 1)
+
+        with open(output_fname, 'rb') as f:
+            new_mols = pickle.load(f)
+
+        with open(debug_fname) as f:
+            debug = ''.join(f.readlines())
+
+        with open(conf_count_fname) as f:
+            conf_mol_count = int(f.readline().strip())
+
+    finally:
+        os.close(input_fd)
+        os.close(output_fd)
+        os.close(conf_count_fd)
+        os.close(debug_fd)
+        os.unlink(input_fname)
+        os.unlink(output_fname)
+        os.unlink(conf_count_fname)
+        os.unlink(debug_fname)
+
+    # return tuple([1, tuple(), 3, 'asdf'])
+    return tuple([int(mol.GetProp('_Name')), tuple(new_mols), conf_mol_count, debug])
+
+
+def get_mol_to_expand(db_fname, max_features):
+    with sqlite3.connect(db_fname) as conn:
+        while True:
+            cur = conn.cursor()
+            cur.execute(f'SELECT id, MIN(priority) '
+                        f'FROM mols '
+                        f'WHERE used = 0 AND processing = 0 AND visited_ids_count < {max_features}')
+            res = cur.fetchone()
+            if res == (None, None):
+                return None
+
+            mol_id, priority = res
+
+            cur.execute(f'SELECT id, conf_id, mol_block, matched_ids, visited_ids '
+                        f'FROM mols '
+                        f'WHERE id = {mol_id}')
+            res = cur.fetchall()
+
+            mol = Chem.MolFromMolBlock(res[0][2])
+            mol.SetProp('_Name', str(res[0][0]))
+            mol.SetProp('visited_ids', res[0][4])
+            mol.GetConformer().SetId(res[0][1])
+            mol.GetConformer().SetProp('matched_ids', res[0][3])
+            for mol_id, conf_id, mol_block, matched_ids, visited_ids in res[1:]:
+                m = Chem.MolFromMolBlock(mol_block)
+                m.GetConformer().SetId(conf_id)
+                m.GetConformer().SetProp('matched_ids', matched_ids)
+                mol.AddConformer(m.GetConformer(), assignId=False)
+
+            cur.execute(f'UPDATE mols SET processing = 1 WHERE id = {mol_id}')
+
+            return mol
 
 
 def main():
