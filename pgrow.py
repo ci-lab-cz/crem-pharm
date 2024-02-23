@@ -40,7 +40,7 @@ def is_collinear(p, epsilon=0.01):
     id1, id2 = np.where(d == np.max(d))[0]   # most distant features
     max_dist = d[id1, id2]
     for i in set(range(d.shape[0])) - {id1, id2}:
-        if max_dist - d[i, id1] - d[i, id2] > epsilon:
+        if (d[i, id1] + d[i, id2]) - max_dist > epsilon:
             return False
     return True
 
@@ -452,7 +452,7 @@ def main():
     p.load_from_xyz(args.query)
     p.set_clusters(args.clustering_threshold, args.ids)
 
-    print(p.clusters)
+    print(p.clusters, flush=True)
 
     res_db_fname = os.path.join(args.output, 'res.db')
 
