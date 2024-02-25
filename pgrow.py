@@ -337,36 +337,35 @@ def expand_mol_cli(mol, pharm_fname, config_fname):
 
 def get_mol_to_expand(db_fname, max_features):
     with sqlite3.connect(db_fname) as conn:
-        while True:
-            cur = conn.cursor()
-            cur.execute(f'SELECT id, MIN(priority) '
-                        f'FROM mols '
-                        f'WHERE used = 0 AND processing = 0 AND visited_ids_count < {max_features}')
-            res = cur.fetchone()
-            if res == (None, None):
-                return None
+        cur = conn.cursor()
+        cur.execute(f'SELECT id, MIN(priority) '
+                    f'FROM mols '
+                    f'WHERE used = 0 AND processing = 0 AND visited_ids_count < {max_features}')
+        res = cur.fetchone()
+        if res == (None, None):
+            return None
 
-            mol_id, priority = res
+        mol_id, priority = res
 
-            cur.execute(f'SELECT id, conf_id, mol_block, matched_ids, visited_ids '
-                        f'FROM mols '
-                        f'WHERE id = {mol_id}')
-            res = cur.fetchall()
+        cur.execute(f'SELECT id, conf_id, mol_block, matched_ids, visited_ids '
+                    f'FROM mols '
+                    f'WHERE id = {mol_id}')
+        res = cur.fetchall()
 
-            mol = Chem.MolFromMolBlock(res[0][2])
-            mol.SetProp('_Name', str(res[0][0]))
-            mol.SetProp('visited_ids', res[0][4])
-            mol.GetConformer().SetId(res[0][1])
-            mol.GetConformer().SetProp('matched_ids', res[0][3])
-            for mol_id, conf_id, mol_block, matched_ids, visited_ids in res[1:]:
-                m = Chem.MolFromMolBlock(mol_block)
-                m.GetConformer().SetId(conf_id)
-                m.GetConformer().SetProp('matched_ids', matched_ids)
-                mol.AddConformer(m.GetConformer(), assignId=False)
+        mol = Chem.MolFromMolBlock(res[0][2])
+        mol.SetProp('_Name', str(res[0][0]))
+        mol.SetProp('visited_ids', res[0][4])
+        mol.GetConformer().SetId(res[0][1])
+        mol.GetConformer().SetProp('matched_ids', res[0][3])
+        for mol_id, conf_id, mol_block, matched_ids, visited_ids in res[1:]:
+            m = Chem.MolFromMolBlock(mol_block)
+            m.GetConformer().SetId(conf_id)
+            m.GetConformer().SetProp('matched_ids', matched_ids)
+            mol.AddConformer(m.GetConformer(), assignId=False)
 
-            cur.execute(f'UPDATE mols SET processing = 1 WHERE id = {mol_id}')
+        cur.execute(f'UPDATE mols SET processing = 1 WHERE id = {mol_id}')
 
-            return mol
+        return mol
 
 
 def main():
