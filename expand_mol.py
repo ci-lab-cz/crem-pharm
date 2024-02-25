@@ -299,7 +299,8 @@ def select_mols(mols, ncpu=1):
                 deleted[remove_ids] = 1
         output = [mols[i][0] for i in np.where(deleted == 0)[0]]
     finally:
-        pool.close()
+        if pool:
+            pool.close()
 
     return output
 
