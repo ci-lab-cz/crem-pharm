@@ -490,7 +490,9 @@ def main():
                 conf.SetProp('parent_conf_id', 'None')
         save_res(mols, None, res_db_fname)
 
-    # mol = choose_mol_to_grow(res_db_fname, p.get_num_features())
+    else:  # set all processing flags to 0 (for restart)
+        with sqlite3.connect(res_db_fname) as conn:
+            conn.execute("UPDATE mols SET processing = 0 WHERE processing = 1")
 
     pharm_fd, pharm_fname = tempfile.mkstemp(suffix='_pharm.pkl', text=True)
     with open(pharm_fname, 'wb') as f:
