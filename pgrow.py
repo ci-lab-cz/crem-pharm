@@ -27,7 +27,7 @@ from expand_mol import remove_confs_exclvol, select_mols, merge_confs, remove_co
 from pharm_class import PharmModel2
 
 
-def is_collinear(p, epsilon=0.01):
+def is_collinear(p, epsilon=0.1):
     a = np.array([xyz for label, xyz in p.get_feature_coords()])
     a = np.around(a, 3)
     a = np.unique(a, axis=0)
