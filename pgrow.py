@@ -144,12 +144,17 @@ def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd, ncpu):
         m.SetProp('_Name', mol_name)
         for k, (rms, matrix) in rmsd_dict.items():
             AllChem.TransformMol(m, matrix, k, keepConfs=True)
-            m.SetProp('rms', str(rms))
-            w.write(m, k)
+        remove_conf_ids = [x.GetId() for x in m.GetConformers() if x.GetId() not in rmsd_dict.keys()]
+        for conf_id in sorted(remove_conf_ids, reverse=True):
+            m.RemoveConformer(conf_id)
+        m = remove_confs_rms(m)
+        for conf in m.GetConformers():
+            conf_id = conf.GetId()
+            w.write(m, conf_id)
             if rotate_mat is not None:  # rotate molecule if pharmacophore features are collinear
                 for _ in range(360 // theta - 1):
-                    AllChem.TransformMol(m, rotate_mat, k, keepConfs=True)
-                    w.write(m, k)
+                    AllChem.TransformMol(m, rotate_mat, conf_id, keepConfs=True)
+                    w.write(m, conf_id)
     w.close()
     pool.close()
 
