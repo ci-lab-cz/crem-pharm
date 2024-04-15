@@ -15,6 +15,7 @@ import timeit
 import tempfile
 import yaml
 from math import cos, sin, pi
+from functools import partial
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -77,7 +78,7 @@ def get_rotate_matrix_from_collinear_pharm(p, theta):
     return get_rotate_matrix(a[id1].tolist(), a[id2].tolist(), theta)
 
 
-def screen(mol_name, pharm_list, query_mol, query_nfeatures, rmsd):
+def screen(mol_name, mol, pharm_list, query_mol, query_nfeatures, rmsd_to_query, theta, rotate_matrix, exclvol_xyz, exclvol_dist):
 
     # return one map, this can be a problem for fragments with different orientations and the same rmsd
     # [NH2]c1nc([NH2])ncc1 - of two NH2 and n between were matched
@@ -94,42 +95,55 @@ def screen(mol_name, pharm_list, query_mol, query_nfeatures, rmsd):
             if a < min_rmsd:
                 min_rmsd = a
                 min_ids = ids1
-        if min_rmsd <= rmsd:
+        if min_rmsd <= rmsd_to_query:
             rmsd_dict[i] = AllChem.GetAlignmentTransform(Chem.Mol(m1), query_mol,
                                                          atomMap=tuple(zip(min_ids, range(query_nfeatures))))
-    return mol_name, rmsd_dict
+
+    # combine conformers in one Mol object and rotate if needed
+    m = Chem.Mol(mol)
+    for k, (rms, matrix) in rmsd_dict.items():
+        AllChem.TransformMol(m, matrix, k, keepConfs=True)
+    remove_conf_ids = [x.GetId() for x in m.GetConformers() if x.GetId() not in rmsd_dict.keys()]
+    for conf_id in sorted(remove_conf_ids, reverse=True):
+        m.RemoveConformer(conf_id)
+    m = remove_confs_rms(m)
+    new_m = Chem.Mol(m)
+    new_m.RemoveAllConformers()
+    for conf in m.GetConformers():
+        new_m.AddConformer(conf)
+        if rotate_matrix is not None:  # rotate molecule if pharmacophore features are collinear
+            conf_id = conf.GetId()
+            for _ in range(360 // theta - 1):
+                AllChem.TransformMol(m, rotate_matrix, conf_id, keepConfs=True)
+                new_m.AddConformer(m.GetConformer(id=conf_id))
+
+    new_m.SetProp('_Name', mol_name)
+    new_m = remove_confs_exclvol(new_m, exclvol_xyz, exclvol_dist)   # can return None
+
+    return new_m
 
 
-def screen_mp(items):
-    return screen(*items)
+def screen_mp(args, **kwargs):
+    return screen(*args, **kwargs)
 
 
-def supply_screen(db, query_mol, rmsd):
-    n = query_mol.GetNumAtoms()
+def supply_screen(db):
     mol_names = db.get_mol_names()
     for mol_name in mol_names:
         pharm_dict = db.get_pharm(mol_name)
         try:
+            mol = db.get_mol(mol_name)[0]   # because there is only one stereoisomer for each entry
             pharm_list = pharm_dict[0]   # because there is only one stereoisomer for each entry
         except KeyError:
-            sys.stderr.write(f'{mol_name} does not have pharm_dict[0]\n')
+            sys.stderr.write(f'{mol_name} does not have mol[0] or pharm_dict[0]\n')
             continue
-        yield mol_name, pharm_list, query_mol, n, rmsd
+        yield mol_name, mol, pharm_list
 
 
-def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd, ncpu):
+def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd_to_query, exclvol_xyz, exclvol_dist, ncpu):
 
     db = DB(db_fname)
     query_mol = query_pharm.get_mol()
-
-    pool = Pool(ncpu)
-    d = []
-    for mol_name, rmsd_dict in pool.imap_unordered(screen_mp, supply_screen(db, query_mol, rmsd)):
-        if rmsd_dict:
-            d.append((mol_name, rmsd_dict))
-
-    if not d:
-        return False
 
     # for additional sampling of collinear pharmacophores
     theta = 10
@@ -138,27 +152,22 @@ def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd, ncpu):
     else:
         rotate_mat = None
 
-    w = Chem.SDWriter(output_sdf)
-    for mol_name, rmsd_dict in d:
-        m = db.get_mol(mol_name)[0]
-        m.SetProp('_Name', mol_name)
-        for k, (rms, matrix) in rmsd_dict.items():
-            AllChem.TransformMol(m, matrix, k, keepConfs=True)
-        remove_conf_ids = [x.GetId() for x in m.GetConformers() if x.GetId() not in rmsd_dict.keys()]
-        for conf_id in sorted(remove_conf_ids, reverse=True):
-            m.RemoveConformer(conf_id)
-        m = remove_confs_rms(m)
-        for conf in m.GetConformers():
-            conf_id = conf.GetId()
-            w.write(m, conf_id)
-            if rotate_mat is not None:  # rotate molecule if pharmacophore features are collinear
-                for _ in range(360 // theta - 1):
-                    AllChem.TransformMol(m, rotate_mat, conf_id, keepConfs=True)
-                    w.write(m, conf_id)
-    w.close()
+    pool = Pool(ncpu)
+    output = []
+    for mol in pool.imap_unordered(partial(screen_mp,
+                                           query_mol=query_mol,
+                                           query_nfeatures=query_mol.GetNumAtoms(),
+                                           rmsd_to_query=rmsd_to_query,
+                                           theta=theta,
+                                           rotate_matrix=rotate_mat,
+                                           exclvol_xyz=exclvol_xyz,
+                                           exclvol_dist=exclvol_dist),
+                                   supply_screen(db)):
+        if mol:
+            output.append(mol)
     pool.close()
 
-    return True
+    return output
 
 
 def create_db(db_fname):
@@ -471,26 +480,21 @@ def main():
         print(f"===== Initial screening =====")
         start = timeit.default_timer()
 
-        flag = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments,
-                              output_sdf=conf_fname, rmsd=0.2, ncpu=args.ncpu)
-        if not flag:
+        mols = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments,
+                              output_sdf=conf_fname, rmsd_to_query=min(0.25, args.dist), ncpu=args.ncpu,
+                              exclvol_xyz=p.exclvol, exclvol_dist=args.exclusion_volume)
+        if not mols:
             exit('No matches between starting fragments and the chosen subpharmacophore.')
 
         print(f'{round(timeit.default_timer() - start, 4)}')
 
-        mols = [mol for mol, mol_name in read_input(conf_fname, sdf_confs=True)]
-        mols = [remove_confs_exclvol(mol, p.exclvol, args.exclusion_volume) for mol in mols]
-        mols = [m for m in mols if m]  # remove None objects
         mols = select_mols(mols, ncpu=args.ncpu)
         ids = ','.join(map(str, new_pids))
         for mol in mols:
             mol.SetProp('visited_ids', ids)
             for conf in mol.GetConformers():
+                conf.SetProp('visited_ids', ids)
                 conf.SetProp('matched_ids', ids)
-        mols = merge_confs({None: mols})   # return list of mols
-        mols = [remove_confs_rms(m) for m in mols]
-        for mol in mols:
-            for conf in mol.GetConformers():
                 conf.SetProp('parent_conf_id', 'None')
         save_res(mols, None, res_db_fname)
 
