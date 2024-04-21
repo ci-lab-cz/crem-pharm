@@ -110,12 +110,12 @@ def screen(mol_name, mol, pharm_list, query_mol, query_nfeatures, rmsd_to_query,
     new_m = Chem.Mol(m)
     new_m.RemoveAllConformers()
     for conf in m.GetConformers():
-        new_m.AddConformer(conf)
+        new_m.AddConformer(conf, assignId=True)
         if rotate_matrix is not None:  # rotate molecule if pharmacophore features are collinear
             conf_id = conf.GetId()
             for _ in range(360 // theta - 1):
                 AllChem.TransformMol(m, rotate_matrix, conf_id, keepConfs=True)
-                new_m.AddConformer(m.GetConformer(id=conf_id))
+                new_m.AddConformer(m.GetConformer(id=conf_id), assignId=True)
 
     new_m.SetProp('_Name', mol_name)
     new_m = remove_confs_exclvol(new_m, exclvol_xyz, exclvol_dist)   # can return None
