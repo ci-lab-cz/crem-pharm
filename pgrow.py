@@ -6,7 +6,7 @@ import sys
 import shutil
 import json
 import pickle
-from multiprocessing import Pool
+from multiprocessing import Pool, cpu_count
 from scipy.spatial.distance import cdist
 import numpy as np
 import sqlite3
@@ -16,6 +16,7 @@ import tempfile
 import yaml
 from math import cos, sin, pi
 from functools import partial
+from collections import Counter
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -481,14 +482,19 @@ def main():
         start = timeit.default_timer()
 
         mols = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments,
-                              output_sdf=conf_fname, rmsd_to_query=min(0.25, args.dist), ncpu=args.ncpu,
+                              output_sdf=conf_fname, rmsd_to_query=min(0.25, args.dist),
+                              ncpu=min(args.ncpu * args.num_workers, cpu_count()),
                               exclvol_xyz=p.exclvol, exclvol_dist=args.exclusion_volume)
         if not mols:
             exit('No matches between starting fragments and the chosen subpharmacophore.')
 
-        print(f'{round(timeit.default_timer() - start, 4)}')
+        print(f'screening: {round(timeit.default_timer() - start, 4)}')
+        start = timeit.default_timer()
+        c = Counter((m.GetNumHeavyAtoms() for m in mols))
+        print(f'select_mols: from {len(mols)} molecules')
+        print(sorted(c.items()))
 
-        mols = select_mols(mols, ncpu=args.ncpu)
+        mols = select_mols(mols, ncpu=min(args.ncpu * args.num_workers, cpu_count()))
         ids = ','.join(map(str, new_pids))
         for mol in mols:
             mol.SetProp('visited_ids', ids)
@@ -497,6 +503,8 @@ def main():
                 conf.SetProp('matched_ids', ids)
                 conf.SetProp('parent_conf_id', 'None')
         save_res(mols, None, res_db_fname)
+
+        print(f'select_mols: {round(timeit.default_timer() - start, 4)}')
 
     else:  # set all processing flags to 0 (for restart)
         with sqlite3.connect(res_db_fname) as conn:
