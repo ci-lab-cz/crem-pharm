@@ -260,9 +260,14 @@ def check_substr_mols(large, large_ring_ids, small):
     else:
         for ids in large.GetSubstructMatches(small):
             ids = set(ids)
+            ring_intersections = []   # collects True - if a ring is a full subset of matched features or
+                                      # do not intersect, False - otherwise
+                                      # only mol having all True values are valid for removal
             for r_ids in large_ring_ids:
-                if r_ids.issubset(ids):
-                    return True
+                intersection = r_ids & ids
+                ring_intersections.append((len(intersection) == 0) | (len(intersection) == len(r_ids)))
+            if all(ring_intersections):
+                return True
         return False
 
 
