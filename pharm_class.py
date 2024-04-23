@@ -24,7 +24,7 @@ class PharmModel2(P):
         """
 
         :param clustering_threshold:
-        :param ids: ids of features selected as a starting pharmacophore
+        :param init_ids: ids of features selected as a starting pharmacophore
         :return:
         """
         ids = tuple(set(self._get_ids()) - set(init_ids))
