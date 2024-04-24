@@ -196,6 +196,11 @@ def create_db(db_fname):
 
 def save_res(mols, parent_mol_id, db_fname):
 
+    output = []
+
+    if not mols:
+        return output
+
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
 
@@ -203,41 +208,45 @@ def save_res(mols, parent_mol_id, db_fname):
             cur.execute(f'UPDATE mols SET used = 1, processing = 0 WHERE id = {parent_mol_id}')
             conn.commit()
 
-        if mols:
-            cur.execute('SELECT MAX(id) FROM mols')
-            mol_id = cur.fetchone()[0]
-            if mol_id is None:
-                mol_id = 0
-            parent_mol_id = mols[0].GetPropsAsDict().get('parent_mol_id', None)
-            if parent_mol_id is not None:
-                cur.execute(f'SELECT distinct(priority) FROM mols where id = {parent_mol_id}')
-                parent_priority = cur.fetchone()[0]
-                priority = parent_priority + 1
-            else:
-                priority = 1
-            for mol in mols:
-                parent_mol_id = mol.GetPropsAsDict().get('parent_mol_id', None)
-                mol_id += 1
-                mol.SetProp('_Name', str(mol_id))
-                smi = Chem.MolToSmiles(mol, isomericSmiles=True)
-                for conf in mol.GetConformers():
-                    mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
-                    visited_ids = conf.GetProp('visited_ids')
-                    visited_ids_count = visited_ids.count(',') + 1
-                    matched_ids = conf.GetProp('matched_ids')
-                    matched_ids_count = matched_ids.count(',') + 1
-                    parent_conf_id = conf.GetProp('parent_conf_id')
-                    if parent_conf_id == 'None':
-                        parent_conf_id = None
-                    sql = 'INSERT INTO mols (id, conf_id, smi, mol_block, matched_ids, visited_ids, ' \
-                          '                  matched_ids_count, visited_ids_count, parent_mol_id, ' \
-                          '                  parent_conf_id, priority, used, processing, nmols, time) ' \
-                          'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
-                    cur.execute(sql, (mol_id, conf.GetId(), smi, mol_block, matched_ids, visited_ids,
-                                      matched_ids_count, visited_ids_count, parent_mol_id, parent_conf_id, priority,
-                                      0, 0, 0))
-                priority += 3
-            conn.commit()
+        cur.execute('SELECT MAX(id) FROM mols')
+        mol_id = cur.fetchone()[0]
+        if mol_id is None:
+            mol_id = 0
+
+        # parent_mol_id = mols[0].GetPropsAsDict().get('parent_mol_id', None)
+        if parent_mol_id is not None:
+            cur.execute(f'SELECT distinct(priority) FROM mols where id = {parent_mol_id}')
+            parent_priority = cur.fetchone()[0]
+            priority = parent_priority + 1
+        else:
+            priority = 1
+
+        for mol in mols:
+            # parent_mol_id = mol.GetPropsAsDict().get('parent_mol_id', None)
+            mol_id += 1
+            output.append(mol_id)
+            mol.SetProp('_Name', str(mol_id))
+            smi = Chem.MolToSmiles(mol, isomericSmiles=True)
+            for conf in mol.GetConformers():
+                mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
+                visited_ids = conf.GetProp('visited_ids')
+                visited_ids_count = visited_ids.count(',') + 1
+                matched_ids = conf.GetProp('matched_ids')
+                matched_ids_count = matched_ids.count(',') + 1
+                parent_conf_id = conf.GetProp('parent_conf_id')
+                if parent_conf_id == 'None':
+                    parent_conf_id = None
+                sql = 'INSERT INTO mols (id, conf_id, smi, mol_block, matched_ids, visited_ids, ' \
+                      '                  matched_ids_count, visited_ids_count, parent_mol_id, ' \
+                      '                  parent_conf_id, priority, used, processing, nmols, time) ' \
+                      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
+                cur.execute(sql, (mol_id, conf.GetId(), smi, mol_block, matched_ids, visited_ids,
+                                  matched_ids_count, visited_ids_count, parent_mol_id, parent_conf_id, priority,
+                                  0, 0, 0))
+            priority += 3
+        conn.commit()
+
+    return output
 
 
 def update_db(db_fname, mol_id, nmols):
