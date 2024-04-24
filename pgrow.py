@@ -178,6 +178,7 @@ def create_db(db_fname):
         cur.execute("CREATE TABLE mols("
                     "id INTEGER NOT NULL, "
                     "conf_id INTEGER NOT NULL, "
+                    "smi TEXT NOT NULL, "
                     "mol_block TEXT NOT NULL, "
                     "matched_ids TEXT NOT NULL, "
                     "visited_ids TEXT NOT NULL, "
@@ -218,6 +219,7 @@ def save_res(mols, parent_mol_id, db_fname):
                 parent_mol_id = mol.GetPropsAsDict().get('parent_mol_id', None)
                 mol_id += 1
                 mol.SetProp('_Name', str(mol_id))
+                smi = Chem.MolToSmiles(mol, isomericSmiles=True)
                 for conf in mol.GetConformers():
                     mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
                     visited_ids = conf.GetProp('visited_ids')
@@ -227,12 +229,13 @@ def save_res(mols, parent_mol_id, db_fname):
                     parent_conf_id = conf.GetProp('parent_conf_id')
                     if parent_conf_id == 'None':
                         parent_conf_id = None
-                    sql = 'INSERT INTO mols (id, conf_id, mol_block, matched_ids, visited_ids, ' \
+                    sql = 'INSERT INTO mols (id, conf_id, smi, mol_block, matched_ids, visited_ids, ' \
                           '                  matched_ids_count, visited_ids_count, parent_mol_id, ' \
                           '                  parent_conf_id, priority, used, processing, nmols, time) ' \
-                          'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
-                    cur.execute(sql, (mol_id, conf.GetId(), mol_block, matched_ids, visited_ids, matched_ids_count,
-                                      visited_ids_count, parent_mol_id, parent_conf_id, priority, 0, 0, 0))
+                          'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
+                    cur.execute(sql, (mol_id, conf.GetId(), smi, mol_block, matched_ids, visited_ids,
+                                      matched_ids_count, visited_ids_count, parent_mol_id, parent_conf_id, priority,
+                                      0, 0, 0))
                 priority += 3
             conn.commit()
 
