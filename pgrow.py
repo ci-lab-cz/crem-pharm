@@ -368,17 +368,18 @@ def get_mol_to_expand(db_fname, max_features):
         res = cur.fetchall()
 
         mol = Chem.MolFromMolBlock(res[0][2])
-        mol.SetProp('_Name', str(res[0][0]))
+        mol_id = res[0][0]
+        mol.SetProp('_Name', str(mol_id))
         mol.SetProp('visited_ids', res[0][4])
         mol.GetConformer().SetId(res[0][1])
         mol.GetConformer().SetProp('matched_ids', res[0][3])
-        for mol_id, conf_id, mol_block, matched_ids, visited_ids in res[1:]:
+        for mol_id_, conf_id, mol_block, matched_ids, visited_ids in res[1:]:
             m = Chem.MolFromMolBlock(mol_block)
             m.GetConformer().SetId(conf_id)
             m.GetConformer().SetProp('matched_ids', matched_ids)
             mol.AddConformer(m.GetConformer(), assignId=False)
 
-        cur.execute(f'UPDATE mols SET processing = 1 WHERE id = {mol_id}')
+        cur.execute('UPDATE mols SET processing = 1 WHERE id = ?', (mol_id, ))
 
         return mol
 
