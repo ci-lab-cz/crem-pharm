@@ -23,6 +23,7 @@ import yaml
 #from dask import bag
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolDescriptors
+from rdkit.Chem.AllChem import GetConformerRMSMatrix
 from rdkit.Chem.Crippen import MolLogP
 from rdkit.Chem.Descriptors import MolWt
 from rdkit.Chem.rdMolDescriptors import CalcNumRotatableBonds, CalcTPSA
@@ -33,6 +34,7 @@ from pmapper.utils import load_multi_conf_mol
 from pmapper.pharmacophore import Pharmacophore as P
 from openbabel import openbabel as ob
 from openbabel import pybel
+from sklearn.cluster import AgglomerativeClustering
 
 from pharm_class import PharmModel2
 
@@ -178,34 +180,51 @@ def get_grow_atom_ids(mol, pharm_xyz, tol=2):
     return res
 
 
-def remove_confs_rms(mol, rms=0.25):
+def remove_confs_rms(mol, rms=0.25, keep_nconf=None):
+    """
+    The function uses AgglomerativeClustering to select conformers.
 
-    remove_ids = []
+    :param mol: input molecule with multiple conformers
+    :param rms: discard conformers which are closer than given value to a kept conformer
+    :param keep_nconf: keep the given number of conformers. This parameter has precedence over rms
+    :return:
+    """
+
+    def gen_ids(ids):
+        for i in range(1, len(ids)):
+            for j in range(0, i):
+                yield j, i
+
+    if keep_nconf and mol.GetNumConformers() <= keep_nconf:
+        return mol
+
+    if mol.GetNumConformers() <= 1:
+        return mol
+
     mol_tmp = Chem.RemoveHs(mol)   # calc rms for heavy atoms only
-    match_ids = mol_tmp.GetSubstructMatches(mol_tmp, uniquify=False, useChirality=True)
+    rms_ = GetConformerRMSMatrix(mol_tmp, prealigned=True)
 
-    # determine best rms taking into account symmetry of a molecule
-    rms_list = []
     cids = [c.GetId() for c in mol_tmp.GetConformers()]
-    for i, j in combinations(cids, 2):
-        best_rms = float('inf')
-        for ids in match_ids:
-            rms_calc = np.sqrt(np.mean(np.sum((mol_tmp.GetConformer(i).GetPositions() - mol_tmp.GetConformer(j).GetPositions()[ids, ]) ** 2, axis=1)))
-            if rms_calc < best_rms:
-                best_rms = rms_calc
-        rms_list.append((i, j, best_rms))
+    arr = np.zeros((len(cids), len(cids)))
+    for (i, j), v in zip(gen_ids(cids), rms_):
+        arr[i, j] = v
+        arr[j, i] = v
+    if keep_nconf:
+        cl = AgglomerativeClustering(n_clusters=keep_nconf, linkage='complete', metric='precomputed').fit(arr)
+    else:
+        cl = AgglomerativeClustering(n_clusters=None, linkage='complete', metric='precomputed', distance_threshold=rms).fit(arr)
 
-    while any(item[2] < rms for item in rms_list):
-        for item in rms_list:
-            if item[2] < rms:
-                remove_ids.append(item[1])
-                rms_list = [i for i in rms_list if i[0] != item[1] and i[1] != item[1]]
-                break
+    keep_ids = []
+    for i in set(cl.labels_):
+        ids = np.where(cl.labels_ == i)[0]
+        j = arr[np.ix_(ids, ids)].mean(axis=0).argmin()
+        keep_ids.append(ids[j])
+    remove_ids = set(cids) - set(keep_ids)
 
-    for cid in set(remove_ids):
-        mol.RemoveConformer(cid)
+    for cid in sorted(remove_ids, reverse=True):
+        mol_tmp.RemoveConformer(cid)
 
-    return mol
+    return mol_tmp
 
 
 def reassing_conf_ids(mol):

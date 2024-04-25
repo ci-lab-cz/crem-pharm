@@ -120,6 +120,8 @@ def screen(mol_name, mol, pharm_list, query_mol, query_nfeatures, rmsd_to_query,
 
     new_m.SetProp('_Name', mol_name)
     new_m = remove_confs_exclvol(new_m, exclvol_xyz, exclvol_dist)   # can return None
+    if new_m:
+        new_m = remove_confs_rms(new_m, keep_nconf=20)
 
     return new_m
 
