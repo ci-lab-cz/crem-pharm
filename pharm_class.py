@@ -28,10 +28,13 @@ class PharmModel2(P):
         :return:
         """
         ids = tuple(set(self._get_ids()) - set(init_ids))
-        coords = self.get_xyz(ids)
-        c = AgglomerativeClustering(n_clusters=None, distance_threshold=clustering_threshold).fit(coords)
-        for i, j in enumerate(c.labels_):
-            self.clusters[j].add(ids[i])
+        if len(ids) == 1:  # clustering does not work for one object
+            self.clusters[0].add(ids[0])
+        else:
+            coords = self.get_xyz(ids)
+            c = AgglomerativeClustering(n_clusters=None, distance_threshold=clustering_threshold).fit(coords)
+            for i, j in enumerate(c.labels_):
+                self.clusters[j].add(ids[i])
 
     def get_subpharmacophore(self, ids):
         coords = self.get_feature_coords(ids)
