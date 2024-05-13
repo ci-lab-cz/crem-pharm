@@ -186,7 +186,7 @@ def remove_confs_rms(mol, rms=0.25, keep_nconf=None):
 
     :param mol: input molecule with multiple conformers
     :param rms: discard conformers which are closer than given value to a kept conformer
-    :param keep_nconf: keep the given number of conformers. This parameter has precedence over rms
+    :param keep_nconf: keep at most the given number of conformers. This parameter has precedence over rms
     :return:
     """
 
@@ -218,7 +218,7 @@ def remove_confs_rms(mol, rms=0.25, keep_nconf=None):
     for i in set(cl.labels_):
         ids = np.where(cl.labels_ == i)[0]
         j = arr[np.ix_(ids, ids)].mean(axis=0).argmin()
-        keep_ids.append(ids[j])
+        keep_ids.append(cids[j])
     remove_ids = set(cids) - set(keep_ids)
 
     for cid in sorted(remove_ids, reverse=True):
@@ -807,15 +807,11 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
 
     if new_mols_dict:
         new_mols = merge_confs(new_mols_dict, ncpu=ncpu)  # return list of mols
-        # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}-before.pkl'), 'wb') as f:
-        #     pickle.dump(new_mols, f, protocol=3)
         pool = Pool(ncpu)
         try:
             new_mols = list(pool.imap_unordered(remove_confs_rms, new_mols))
         finally:
             pool.close()
-        # with open(os.path.join(output_dir, f'{mol.GetProp("_Name")}-after.pkl'), 'wb') as f:
-        #     pickle.dump(new_mols, f, protocol=3)
     else:
         new_mols = []
 
