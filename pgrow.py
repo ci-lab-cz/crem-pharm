@@ -189,6 +189,7 @@ def create_db(db_fname):
                     "parent_mol_id INTEGER, "
                     "parent_conf_id INTEGER, "
                     "nmols INTEGER NOT NULL, "
+                    "processing_nmols INTEGER NOT NULL, "
                     "used INTEGER NOT NULL, "
                     "processing INTEGER NOT NULL, "
                     "priority INTEGER NOT NULL, "
@@ -238,26 +239,34 @@ def save_res(mols, parent_mol_id, db_fname):
                     parent_conf_id = None
                 sql = 'INSERT INTO mols (id, conf_id, smi, mol_block, matched_ids, visited_ids, ' \
                       '                  matched_ids_count, visited_ids_count, parent_mol_id, ' \
-                      '                  parent_conf_id, priority, used, processing, nmols, time) ' \
-                      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
+                      '                  parent_conf_id, priority, used, processing, nmols, processing_nmols, time) ' \
+                      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
                 cur.execute(sql, (mol_id, conf.GetId(), smi, mol_block, matched_ids, visited_ids,
                                   matched_ids_count, visited_ids_count, parent_mol_id, parent_conf_id, priority,
-                                  0, 0, 0))
+                                  0, 0, 0, 0))
+                conn.commit()
             priority += 3
-        conn.commit()
 
     return output
 
 
-def update_db(db_fname, mol_id, nmols):
+def update_db(db_fname, mol_id, field, value):
+    """
+    Recursively update field values from bottom to top parent
+    :param db_fname:
+    :param mol_id: id of a starting molecule to update all its parents
+    :param field: field name, normally nmols and processing_nmols
+    :param value: increment value, can be negative for processing_nmols
+    :return:
+    """
     with sqlite3.connect(db_fname) as conn:
         while mol_id is not None:
             cur = conn.cursor()
-            cur.execute('SELECT nmols FROM mols WHERE id = %i' % mol_id)
-            n = cur.fetchone()[0] + nmols
-            cur.execute('UPDATE mols SET nmols = %i WHERE id = %i' % (n, mol_id))
+            cur.execute('SELECT %s FROM mols WHERE id = %i' % (field, mol_id))
+            n = cur.fetchone()[0] + value
+            cur.execute('UPDATE mols SET %s = %i WHERE id = %i' % (field, n, mol_id))
             conn.commit()
-            cur.execute('SELECT parent_mol_id FROM mols WHERE id = %i' % mol_id)
+            cur.execute('SELECT parent_mol_id FROM mols WHERE id = %i' % (mol_id, ))
             mol_id = cur.fetchone()[0]
 
 
@@ -272,7 +281,7 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
                             WHERE id = (
                               SELECT id
                               FROM mols
-                              WHERE visited_ids_count < {max_features} AND used = 0
+                              WHERE visited_ids_count < {max_features} AND used = 0 AND processing = 0
                               ORDER BY
                                 visited_ids_count - matched_ids_count,
                                 matched_ids_count DESC,
@@ -288,12 +297,14 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
                                   a.id, 
                                   a.matched_ids_count, 
                                   a.visited_ids_count, 
-                                  ifnull(b.nmols, a.nmols) AS parent_nmols
-                                FROM (SELECT * FROM mols WHERE visited_ids_count < {max_features} AND used = 0) AS a
+                                  ifnull(b.nmols, a.nmols) AS parent_nmols,
+                                  ifnull(b.processing_nmols, a.processing_nmols) AS parent_processing_nmols
+                                FROM (SELECT * FROM mols WHERE visited_ids_count < {max_features} AND used = 0 AND processing = 0) AS a
                                 LEFT JOIN mols b ON b.id = a.parent_mol_id
                                 ORDER BY
                                   a.visited_ids_count,
                                   a.visited_ids_count - a.matched_ids_count,
+                                  parent_processing_nmols,
                                   parent_nmols
                                 LIMIT 1
                               ) AS c
@@ -303,6 +314,7 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
         if not res:
             return None
 
+        mol_id = res[0][0]
         mol = Chem.MolFromMolBlock(res[0][2])
         mol.SetProp('_Name', str(res[0][0]))
         mol.SetProp('visited_ids', res[0][4])
@@ -314,8 +326,11 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
             m.GetConformer().SetProp('matched_ids', matched_ids)
             mol.AddConformer(m.GetConformer(), assignId=False)
 
-        cur.execute('UPDATE mols SET used = 1 WHERE id = %i' % res[0][0])
+        cur.execute('UPDATE mols SET processing = 1 WHERE id = ?', (mol_id, ))
         conn.commit()
+        update_db(db_fname, mol_id, 'processing_nmols', 1)
+
+        sys.stderr.write(f'mol to grow: {mol.GetProp("_Name")} ({search_deep=})\n')
 
         return mol
 
@@ -521,7 +536,9 @@ def main():
 
     else:  # set all processing flags to 0 (for restart)
         with sqlite3.connect(res_db_fname) as conn:
-            conn.execute("UPDATE mols SET processing = 0 WHERE processing = 1")
+            cur = conn.cursor()
+            cur.execute("UPDATE mols SET processing = 0, processing_nmols = 0")
+            conn.commit()
 
     pharm_fd, pharm_fname = tempfile.mkstemp(suffix='_pharm.pkl', text=True)
     with open(pharm_fname, 'wb') as f:
@@ -544,21 +561,24 @@ def main():
         max_tasks = 2 * args.num_workers
         futures = []
         for _ in range(max_tasks):
-            m = get_mol_to_expand(res_db_fname, p.get_num_features())
+            m = choose_mol_to_grow(res_db_fname, p.get_num_features(), search_deep=False)
             if m:
                 futures.append(dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname))
         seq = as_completed(futures, with_results=True)
         for i, (future, (parent_mol_id, new_mols, nmols, debug)) in enumerate(seq, 1):
-            save_res(new_mols, parent_mol_id, res_db_fname)
+            new_mol_ids = save_res(new_mols, parent_mol_id, res_db_fname)
+            update_db(res_db_fname, parent_mol_id, 'processing_nmols', -1)
+            search_deep = True if new_mol_ids else False
             if nmols:
-                update_db(res_db_fname, parent_mol_id, nmols)
+                update_db(res_db_fname, parent_mol_id, 'nmols', nmols)
             if debug:
                 print(f'===== {parent_mol_id} =====')
                 print(debug)
                 sys.stdout.flush()
             del future
             for _ in range(max_tasks - seq.count()):
-                m = get_mol_to_expand(res_db_fname, p.get_num_features())
+                m = choose_mol_to_grow(res_db_fname, p.get_num_features(), search_deep=search_deep)
+                search_deep = False  # select only one mol to search deep
                 if m:
                     new_future = dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname)
                     seq.add(new_future)
