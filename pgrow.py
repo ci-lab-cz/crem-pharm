@@ -200,14 +200,12 @@ def save_res(mols, parent_mol_id, db_fname):
 
     output = []
 
-    if not mols:
-        return output
-
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
 
         if parent_mol_id is not None:
-            cur.execute(f'UPDATE mols SET used = 1, processing = 0 WHERE id = {parent_mol_id}')
+            cur.execute('UPDATE mols SET used = 1, processing = 0 WHERE id = ?',
+                        (parent_mol_id, ))
             conn.commit()
 
         cur.execute('SELECT MAX(id) FROM mols')
