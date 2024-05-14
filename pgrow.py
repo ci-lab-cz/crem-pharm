@@ -270,25 +270,28 @@ def update_db(db_fname, mol_id, field, value):
             mol_id = cur.fetchone()[0]
 
 
-def choose_mol_to_grow(db_fname, max_features, search_deep=True):
+def choose_mol_to_grow(db_fname, max_features, mol_ids=None):
 
     with sqlite3.connect(db_fname) as conn:
         cur = conn.cursor()
 
-        if search_deep:
+        res = None
+        if mol_ids:
             cur.execute(f"""SELECT id, conf_id, mol_block, matched_ids, visited_ids 
                             FROM mols 
                             WHERE id = (
                               SELECT id
                               FROM mols
-                              WHERE visited_ids_count < {max_features} AND used = 0 AND processing = 0
+                              WHERE visited_ids_count < {max_features} AND used = 0 AND processing = 0 AND id IN ({",".join("?" * len(mol_ids))})
                               ORDER BY
                                 visited_ids_count - matched_ids_count,
                                 matched_ids_count DESC,
                                 rowid DESC
                               LIMIT 1
-                            )""")
-        else:
+                            )""", mol_ids)
+            res = cur.fetchall()
+
+        if not res:
             cur.execute(f"""SELECT id, conf_id, mol_block, matched_ids, visited_ids 
                             FROM mols 
                             WHERE id = (
@@ -310,7 +313,8 @@ def choose_mol_to_grow(db_fname, max_features, search_deep=True):
                               ) AS c
                             )""")
 
-        res = cur.fetchall()
+            res = cur.fetchall()
+
         if not res:
             return None
 
@@ -561,14 +565,13 @@ def main():
         max_tasks = 2 * args.num_workers
         futures = []
         for _ in range(max_tasks):
-            m = choose_mol_to_grow(res_db_fname, p.get_num_features(), search_deep=False)
+            m = choose_mol_to_grow(res_db_fname, p.get_num_features())
             if m:
                 futures.append(dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname))
         seq = as_completed(futures, with_results=True)
         for i, (future, (parent_mol_id, new_mols, nmols, debug)) in enumerate(seq, 1):
             new_mol_ids = save_res(new_mols, parent_mol_id, res_db_fname)
             update_db(res_db_fname, parent_mol_id, 'processing_nmols', -1)
-            search_deep = True if new_mol_ids else False
             if nmols:
                 update_db(res_db_fname, parent_mol_id, 'nmols', nmols)
             if debug:
@@ -577,8 +580,8 @@ def main():
                 sys.stdout.flush()
             del future
             for _ in range(max_tasks - seq.count()):
-                m = choose_mol_to_grow(res_db_fname, p.get_num_features(), search_deep=search_deep)
-                search_deep = False  # select only one mol to search deep
+                m = choose_mol_to_grow(res_db_fname, p.get_num_features(), mol_ids=new_mol_ids)
+                new_mol_ids = None  # select only one mol to search deep
                 if m:
                     new_future = dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname)
                     seq.add(new_future)
