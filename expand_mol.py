@@ -607,9 +607,9 @@ def gen_confs_cdpkit(mols, template_mol, nconf, ncpu):
     # w.close()
     # sio.seek(0)
 
-    input_fd, input_fname = tempfile.mkstemp(suffix='_input.sdf', text=True)
+    input_fd, input_fname = tempfile.mkstemp(suffix=f'_{template_mol.GetProp("_Name")}_input.sdf', text=True)
     template_fd, template_fname = tempfile.mkstemp(suffix='_template.mol', text=True)
-    output_fd, output_fname = tempfile.mkstemp(suffix='_output.sdf', text=True)
+    output_fd, output_fname = tempfile.mkstemp(suffix=f'_{template_mol.GetProp("_Name")}_output.sdf', text=True)
 
     try:
 
