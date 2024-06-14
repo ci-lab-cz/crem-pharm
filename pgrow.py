@@ -28,6 +28,8 @@ from dask.distributed import Client, as_completed
 from expand_mol import remove_confs_exclvol, select_mols, merge_confs, remove_confs_rms
 from pharm_class import PharmModel2
 
+import datetime
+
 
 def is_collinear(p, epsilon=0.1):
     a = np.array([xyz for label, xyz in p.get_feature_coords()])
@@ -333,8 +335,6 @@ def choose_mol_to_grow(db_fname, max_features, mol_ids=None):
         cur.execute('UPDATE mols SET processing = 1 WHERE id = ?', (mol_id, ))
         conn.commit()
         update_db(db_fname, mol_id, 'processing_nmols', 1)
-
-        sys.stderr.write(f'mol to grow: {mol.GetProp("_Name")} ({search_deep=})\n')
 
         return mol
 

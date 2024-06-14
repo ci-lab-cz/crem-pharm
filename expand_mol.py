@@ -218,7 +218,7 @@ def remove_confs_rms(mol, rms=0.25, keep_nconf=None):
     for i in set(cl.labels_):
         ids = np.where(cl.labels_ == i)[0]
         j = arr[np.ix_(ids, ids)].mean(axis=0).argmin()
-        keep_ids.append(cids[j])
+        keep_ids.append(cids[ids[j]])
     remove_ids = set(cids) - set(keep_ids)
 
     for cid in sorted(remove_ids, reverse=True):
