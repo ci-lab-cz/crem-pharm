@@ -417,61 +417,71 @@ def get_mol_to_expand(db_fname, max_features):
 
 def main():
     parser = argparse.ArgumentParser(description='Grow structures to fit query pharmacophore.')
-    parser.add_argument('-q', '--query', metavar='FILENAME', required=True,
+
+    group1 = parser.add_argument_group("Input /output")
+    group1.add_argument('-q', '--query', metavar='FILENAME', required=True,
                         help='pharmacophore model.')
-    parser.add_argument('--ids', metavar='INTEGER', required=True, nargs='+', type=int,
+    group1.add_argument('--ids', metavar='INTEGER', required=True, nargs='+', type=int,
                         help='ids of pharmacophore features used for initial screening. 0-index based.')
-    parser.add_argument('-o', '--output', metavar='DIRNAME', required=True,
+    parser.add_argument('-f', '--fragments', metavar='FILENAME', required=True,
+                        help='file with initial fragments - DB in pmapper format.')
+    group1.add_argument('-o', '--output', metavar='DIRNAME', required=True,
                         help='path to directory where intermediate and final results will be stored. '
                              'If output db file (res.db) exists in the directory the computation will be continued '
                              '(skip screening of initial fragment DB).')
-    parser.add_argument('-t', '--clustering_threshold', metavar='NUMERIC', required=False, type=float, default=3,
+
+    group2 = parser.add_argument_group("Generation settings")
+    group2.add_argument('-t', '--clustering_threshold', metavar='NUMERIC', required=False, type=float, default=3,
                         help='threshold to determine clusters. Default: 3.')
-    parser.add_argument('-f', '--fragments', metavar='FILENAME', required=True,
-                        help='file with initial fragments - DB in pmapper format.')
-    parser.add_argument('-d', '--db', metavar='FILENAME', required=True,
-                        help='database with interchangeable fragments.')
-    parser.add_argument('-r', '--radius', metavar='INTEGER', type=int, choices=[1, 2, 3, 4, 5], default=3,
-                        help='radius of a context of attached fragments.')
-    parser.add_argument('--max_replacements', metavar='INTEGER', type=int, default=None,
-                        help='maximum number of fragments considered for growing. By default all fragments are '
-                             'considered, that may cause combinatorial explosion in some cases.')
-    parser.add_argument('-x', '--additional_features', action='store_true', default=False,
-                        help='indicate if the fragment database contains pharmacophore features to be used for '
-                             'fragment selection.')
-    parser.add_argument('-n', '--nconf', metavar='INTEGER', required=False, type=int, default=20,
+    group2.add_argument('-n', '--nconf', metavar='INTEGER', required=False, type=int, default=20,
                         help='number of conformers generated per structure. Default: 20.')
-    parser.add_argument('--conf_gen', metavar='STRING', required=False, type=str, default='rdkit',
+    group2.add_argument('--conf_gen', metavar='STRING', required=False, type=str, default='rdkit',
                         help='can take "rdkit" or "ob" values to choose conformer generator. Default: rdkit.')
-    parser.add_argument('-s', '--seed', metavar='INTEGER', required=False, type=int, default=-1,
+    group2.add_argument('-s', '--seed', metavar='INTEGER', required=False, type=int, default=-1,
                         help='seed for random number generator to get reproducible output. Default: -1.')
-    parser.add_argument('--dist', metavar='NUMERIC', required=False, type=float, default=1,
+    group2.add_argument('--dist', metavar='NUMERIC', required=False, type=float, default=1,
                         help='maximum distance to discard conformers in fast filtering. Default: 1.')
-    parser.add_argument('-e', '--exclusion_volume', metavar='NUMERIC', required=False, type=float, default=-1,
+    group2.add_argument('-e', '--exclusion_volume', metavar='NUMERIC', required=False, type=float, default=-1,
                         help='radius of exclusion volumes (distance to heavy atoms). By default exclusion volumes are '
                              'disabled even if they are present in a query pharmacophore. To enable them set '
                              'a positive numeric value.')
-    parser.add_argument('--mw', metavar='NUMERIC', required=False, type=float, default=450,
-                        help='Maximum molecular weight of generated compounds. Default: 450.')
-    parser.add_argument('--tpsa', metavar='NUMERIC', required=False, type=float, default=120,
-                        help='Maximum TPSA of generated compounds. Default: 120.')
-    parser.add_argument('--rtb', metavar='NUMERIC', required=False, type=float, default=7,
-                        help='Maximum number of rotatable bonds in generated compounds. Default: 7.')
-    parser.add_argument('--logp', metavar='NUMERIC', required=False, type=float, default=4,
-                        help='Maximum logP of generated compounds. Default: 4.')
-    parser.add_argument('--hash_db', metavar='FILENAME', required=False, default=None,
+    group2.add_argument('--hash_db', metavar='FILENAME', required=False, default=None,
                         help='database with 3D pharmacophore hashes for additional filtering of fragments for growing.')
-    parser.add_argument('--hash_db_bin_step', metavar='NUMERIC', required=False, default=1, type=float,
+    group2.add_argument('--hash_db_bin_step', metavar='NUMERIC', required=False, default=1, type=float,
                         help='bin step used to create 3D pharmacophore hashes.')
-    parser.add_argument('-u', '--hostfile', metavar='FILENAME', required=False, type=str, default=None,
+
+    group3 = parser.add_argument_group("CReM settings")
+    group3.add_argument('-d', '--db', metavar='FILENAME', required=True,
+                        help='database with interchangeable fragments.')
+    group3.add_argument('-r', '--radius', metavar='INTEGER', type=int, choices=[1, 2, 3, 4, 5], default=3,
+                        help='radius of a context of attached fragments.')
+    group3.add_argument('--max_replacements', metavar='INTEGER', type=int, default=None,
+                        help='maximum number of fragments considered for growing. By default all fragments are '
+                             'considered, that may cause combinatorial explosion in some cases.')
+    group3.add_argument('-x', '--additional_features', action='store_true', default=False,
+                        help='indicate if the fragment database contains pharmacophore features to be used for '
+                             'fragment selection.')
+
+    group4 = parser.add_argument_group("Physicochemical properties")
+    group4.add_argument('--mw', metavar='NUMERIC', required=False, type=float, default=450,
+                        help='Maximum molecular weight of generated compounds. Default: 450.')
+    group4.add_argument('--tpsa', metavar='NUMERIC', required=False, type=float, default=120,
+                        help='Maximum TPSA of generated compounds. Default: 120.')
+    group4.add_argument('--rtb', metavar='NUMERIC', required=False, type=float, default=7,
+                        help='Maximum number of rotatable bonds in generated compounds. Default: 7.')
+    group4.add_argument('--logp', metavar='NUMERIC', required=False, type=float, default=4,
+                        help='Maximum logP of generated compounds. Default: 4.')
+
+    group5 = parser.add_argument_group("Running settings")
+    group5.add_argument('-u', '--hostfile', metavar='FILENAME', required=False, type=str, default=None,
                         help='text file with addresses of nodes of dask SSH cluster. The most typical, it can be '
                              'passed as $PBS_NODEFILE variable from inside a PBS script. The first line in this file '
                              'will be the address of the scheduler running on the standard port 8786. If omitted, '
                              'calculations will run on a single machine as usual.')
-    parser.add_argument('-w', '--num_workers', metavar='INTEGER', required=False, type=int, default=1,
+    group5.add_argument('-w', '--num_workers', metavar='INTEGER', required=False, type=int, default=1,
                         help='the number of workers to be spawn by the dask cluster. This will limit the maximum '
                              'number of processed molecules simultaneously. Default: 1.')
-    parser.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
+    group5.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
                         help='number of cpu cores to use per molecule. Default: 1.')
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
