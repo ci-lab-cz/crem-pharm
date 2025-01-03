@@ -5,20 +5,17 @@ Requires the corresponding version of crem module, which supports filter_func ar
 By default the program should work as previously.  
 
 
-##### Installation of modules required for running program supporting additional filtering of fragments by 3D hashes
-
-RDKit should be installed in advance with python 3.7+
-
-crem version 0.2.11 is required
+#### Installation of modules required for running program supporting additional filtering of fragments by 3D hashes
 
 ```
-pip install pmapper crem
-```
+conda install -c conda-forge python rdkit scikit-learn openbabel networkx pyyaml dask distributed
+pip install crem
 
-```
+# Specific version of psearch supporting pre-compiled pharmacophore databases
 pip install git+https://github.com/meddwl/psearch.git@gen_pharms
 ```
+Optional installations of conformer generators
 
-```
-conda install -c conda-forge scikit-learn openbabel networkx pyyaml dask distributed
-``` 
+**CDPKit** (highly recommended) - https://cdpkit.org/installation.html#installation-via-installer-package (install all binaries. not Python-bindings only)  
+
+**OpenBabel**
