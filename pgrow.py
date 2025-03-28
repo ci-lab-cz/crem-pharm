@@ -7,6 +7,8 @@ import shutil
 import json
 import pickle
 from multiprocessing import Pool, cpu_count
+
+from dominate.tags import output
 from scipy.spatial.distance import cdist
 import numpy as np
 import sqlite3
@@ -14,6 +16,7 @@ import subprocess
 import timeit
 import tempfile
 import yaml
+import logging
 from math import cos, sin, pi
 from functools import partial
 from collections import Counter
@@ -415,6 +418,20 @@ def get_mol_to_expand(db_fname, max_features):
         return mol
 
 
+def get_stat_string_from_db(db_fname):
+    with sqlite3.connect(db_fname) as conn:
+        cur = conn.cursor()
+        # nmols_embedded_3d = sum(cur.execute('SELECT min(nmols) FROM mols WHERE parent_mol_id IS NULL GROUP BY id').fetchall())
+        nmol_stored = sum(cur.execute('SELECT COUNT(DISTINCT id) FROM mols').fetchone())
+        # cur.execute('SELECT c, count(rowid) FROM '
+        #             '(SELECT id, max(matched_ids_count) as c FROM mols GROUP BY id)')
+        # nmol_stored = cur.fetchall()
+        nmol_not_expaded = sum(cur.execute('SELECT COUNT(DISTINCT id) FROM mols WHERE used = 0').fetchone())
+        output = (f'Total number of mols found: {nmol_stored}, '
+                  f'number of remained not expanded mols: {nmol_not_expaded}')
+    return output
+
+
 def main():
     parser = argparse.ArgumentParser(description='Grow structures to fit query pharmacophore.',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -484,12 +501,20 @@ def main():
     group5.add_argument('-w', '--num_workers', metavar='INTEGER', required=False, type=int, default=1,
                         help='the number of workers to be spawn by the dask cluster. This will limit the maximum '
                              'number of processed molecules simultaneously.')
+    group5.add_argument('--log', metavar='FILENAME', required=False, type=str, default=None,
+                        help='log file to collect progress and debug messages. If omitted, the log file with the same '
+                             'name as output DB will be created.')
     group5.add_argument('-c', '--ncpu', metavar='INTEGER', required=False, type=int, default=1,
                         help='number of cpu cores to use per molecule.')
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 
     args = parser.parse_args()
+
+    if args.log:
+        logging.basicConfig(filename=args.log, filemode='a', level=logging.DEBUG,
+                            encoding='utf-8', datefmt='%Y-%m-%d %H:%M:%S',
+                            format='[%(asctime)s] %(levelname)s: (PID:%(process)d) %(message)s')
 
     if args.hostfile is not None:
         with open(args.hostfile) as f:
@@ -510,6 +535,8 @@ def main():
     p = PharmModel2()
     p.load_from_xyz(args.query)
     p.set_clusters(args.clustering_threshold, args.ids)
+    if args.log:
+        logging.info('Pharmacophore model was parsed.')
 
     print(p.clusters, flush=True)
 
@@ -518,6 +545,8 @@ def main():
     if not os.path.isfile(res_db_fname):  # create DB and match starting fragments
 
         create_db(res_db_fname)
+        if args.log:
+            logging.info('Empty output database was created.')
 
         conf_fname = os.path.join(args.output, f'iter0.sdf')
 
@@ -526,12 +555,18 @@ def main():
         print(f"===== Initial screening =====")
         start = timeit.default_timer()
 
+        if args.log:
+            logging.info('Screening of starting fragments was started.')
         mols = screen_pmapper(query_pharm=p.get_subpharmacophore(new_pids), db_fname=args.fragments,
                               output_sdf=conf_fname, rmsd_to_query=min(0.25, args.dist),
                               ncpu=min(args.ncpu * args.num_workers, cpu_count()),
                               exclvol_xyz=p.exclvol, exclvol_dist=args.exclusion_volume)
+        if args.log:
+            logging.info(f'Screening of starting fragments was finished. Found fragments: {len(mols)}.')
         if not mols:
-            exit('No matches between starting fragments and the chosen subpharmacophore.')
+            if args.log:
+                logging.info('Program finished.')
+            exit('Program finished. No matches between starting fragments and the chosen subpharmacophore.')
 
         print(f'screening: {round(timeit.default_timer() - start, 4)}')
         start = timeit.default_timer()
@@ -548,6 +583,8 @@ def main():
                 conf.SetProp('matched_ids', ids)
                 conf.SetProp('parent_conf_id', 'None')
         save_res(mols, None, res_db_fname)
+        if args.log:
+            logging.info(f'Non-redundant starting fragments were stored to the database: {len(mols)} fragments.')
 
         print(f'select_mols: {round(timeit.default_timer() - start, 4)}')
 
@@ -556,6 +593,8 @@ def main():
             cur = conn.cursor()
             cur.execute("UPDATE mols SET processing = 0, processing_nmols = 0")
             conn.commit()
+        if args.log:
+            logging.info(f'The output database exists. Attempt to continue generation.')
 
     pharm_fd, pharm_fname = tempfile.mkstemp(suffix='_pharm.pkl', text=True)
     with open(pharm_fname, 'wb') as f:
@@ -587,6 +626,9 @@ def main():
             update_db(res_db_fname, parent_mol_id, 'processing_nmols', -1)
             if nmols:
                 update_db(res_db_fname, parent_mol_id, 'nmols', nmols)
+            if args.log:
+                logging.info(f'{get_stat_string_from_db(res_db_fname)}')
+                # logging.debug(f'===== {parent_mol_id} =====\n' + debug)
             if debug:
                 print(f'===== {parent_mol_id} =====')
                 print(debug)
