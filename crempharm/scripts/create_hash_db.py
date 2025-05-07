@@ -12,7 +12,7 @@ from pmapper.customize import load_smarts
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from read_input import read_input
+from old_scripts.read_input import read_input
 
 smarts = load_smarts(path.join(path.dirname(path.realpath(__file__)), 'smarts_features.txt'))
 

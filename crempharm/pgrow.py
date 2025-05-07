@@ -8,7 +8,6 @@ import json
 import pickle
 from multiprocessing import Pool, cpu_count
 
-from dominate.tags import output
 from scipy.spatial.distance import cdist
 import numpy as np
 import sqlite3
@@ -25,13 +24,11 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from pmapper.pharmacophore import Pharmacophore as P
 from psearch.database import DB
-from read_input import read_input
 from dask.distributed import Client, as_completed
 
-from expand_mol import remove_confs_exclvol, select_mols, merge_confs, remove_confs_rms
-from pharm_class import PharmModel2
-
-import datetime
+from crempharm.expand_mol import remove_confs_exclvol, select_mols, merge_confs, remove_confs_rms
+from crempharm.pharm_class import PharmModel2
+from crempharm.database import create_db, save_res, update_db, get_stat_string_from_db
 
 
 def is_collinear(p, epsilon=0.1):
@@ -178,103 +175,6 @@ def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd_to_query, exclvol_xyz
     return output
 
 
-def create_db(db_fname):
-    with sqlite3.connect(db_fname) as conn:
-        cur = conn.cursor()
-        cur.execute("DROP TABLE IF EXISTS mols")
-        cur.execute("CREATE TABLE mols("
-                    "id INTEGER NOT NULL, "
-                    "conf_id INTEGER NOT NULL, "
-                    "smi TEXT NOT NULL, "
-                    "mol_block TEXT NOT NULL, "
-                    "matched_ids TEXT NOT NULL, "
-                    "visited_ids TEXT NOT NULL, "
-                    "matched_ids_count INTEGER NOT NULL, "
-                    "visited_ids_count INTEGER NOT NULL, "
-                    "parent_mol_id INTEGER, "
-                    "parent_conf_id INTEGER, "
-                    "nmols INTEGER NOT NULL, "
-                    "processing_nmols INTEGER NOT NULL, "
-                    "used INTEGER NOT NULL, "
-                    "processing INTEGER NOT NULL, "
-                    "priority INTEGER NOT NULL, "
-                    "time TEXT NOT NULL)")
-        conn.commit()
-
-
-def save_res(mols, parent_mol_id, db_fname):
-
-    output = []
-
-    with sqlite3.connect(db_fname) as conn:
-        cur = conn.cursor()
-
-        if parent_mol_id is not None:
-            cur.execute('UPDATE mols SET used = 1, processing = 0 WHERE id = ?',
-                        (parent_mol_id, ))
-            conn.commit()
-
-        cur.execute('SELECT MAX(id) FROM mols')
-        mol_id = cur.fetchone()[0]
-        if mol_id is None:
-            mol_id = 0
-
-        # parent_mol_id = mols[0].GetPropsAsDict().get('parent_mol_id', None)
-        if parent_mol_id is not None:
-            cur.execute(f'SELECT distinct(priority) FROM mols where id = {parent_mol_id}')
-            parent_priority = cur.fetchone()[0]
-            priority = parent_priority + 1
-        else:
-            priority = 1
-
-        for mol in mols:
-            # parent_mol_id = mol.GetPropsAsDict().get('parent_mol_id', None)
-            mol_id += 1
-            output.append(mol_id)
-            mol.SetProp('_Name', str(mol_id))
-            smi = Chem.MolToSmiles(mol, isomericSmiles=True)
-            for conf in mol.GetConformers():
-                mol_block = Chem.MolToMolBlock(mol, confId=conf.GetId())
-                visited_ids = conf.GetProp('visited_ids')
-                visited_ids_count = visited_ids.count(',') + 1
-                matched_ids = conf.GetProp('matched_ids')
-                matched_ids_count = matched_ids.count(',') + 1
-                parent_conf_id = conf.GetProp('parent_conf_id')
-                if parent_conf_id == 'None':
-                    parent_conf_id = None
-                sql = 'INSERT INTO mols (id, conf_id, smi, mol_block, matched_ids, visited_ids, ' \
-                      '                  matched_ids_count, visited_ids_count, parent_mol_id, ' \
-                      '                  parent_conf_id, priority, used, processing, nmols, processing_nmols, time) ' \
-                      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)'
-                cur.execute(sql, (mol_id, conf.GetId(), smi, mol_block, matched_ids, visited_ids,
-                                  matched_ids_count, visited_ids_count, parent_mol_id, parent_conf_id, priority,
-                                  0, 0, 0, 0))
-                conn.commit()
-            priority += 3
-
-    return output
-
-
-def update_db(db_fname, mol_id, field, value):
-    """
-    Recursively update field values from bottom to top parent
-    :param db_fname:
-    :param mol_id: id of a starting molecule to update all its parents
-    :param field: field name, normally nmols and processing_nmols
-    :param value: increment value, can be negative for processing_nmols
-    :return:
-    """
-    with sqlite3.connect(db_fname) as conn:
-        while mol_id is not None:
-            cur = conn.cursor()
-            cur.execute('SELECT %s FROM mols WHERE id = %i' % (field, mol_id))
-            n = cur.fetchone()[0] + value
-            cur.execute('UPDATE mols SET %s = %i WHERE id = %i' % (field, n, mol_id))
-            conn.commit()
-            cur.execute('SELECT parent_mol_id FROM mols WHERE id = %i' % (mol_id, ))
-            mol_id = cur.fetchone()[0]
-
-
 def choose_mol_to_grow(db_fname, max_features, mol_ids=None):
 
     with sqlite3.connect(db_fname) as conn:
@@ -384,57 +284,9 @@ def expand_mol_cli(mol, pharm_fname, config_fname):
     return tuple([int(mol.GetProp('_Name')), tuple(new_mols), conf_mol_count, debug])
 
 
-def get_mol_to_expand(db_fname, max_features):
-    with sqlite3.connect(db_fname) as conn:
-        cur = conn.cursor()
-        cur.execute(f'SELECT id, MIN(priority) '
-                    f'FROM mols '
-                    f'WHERE used = 0 AND processing = 0 AND visited_ids_count < {max_features}')
-        res = cur.fetchone()
-        if res == (None, None):
-            return None
-
-        mol_id, priority = res
-
-        cur.execute(f'SELECT id, conf_id, mol_block, matched_ids, visited_ids '
-                    f'FROM mols '
-                    f'WHERE id = {mol_id}')
-        res = cur.fetchall()
-
-        mol = Chem.MolFromMolBlock(res[0][2])
-        mol_id = res[0][0]
-        mol.SetProp('_Name', str(mol_id))
-        mol.SetProp('visited_ids', res[0][4])
-        mol.GetConformer().SetId(res[0][1])
-        mol.GetConformer().SetProp('matched_ids', res[0][3])
-        for mol_id_, conf_id, mol_block, matched_ids, visited_ids in res[1:]:
-            m = Chem.MolFromMolBlock(mol_block)
-            m.GetConformer().SetId(conf_id)
-            m.GetConformer().SetProp('matched_ids', matched_ids)
-            mol.AddConformer(m.GetConformer(), assignId=False)
-
-        cur.execute('UPDATE mols SET processing = 1 WHERE id = ?', (mol_id, ))
-
-        return mol
-
-
-def get_stat_string_from_db(db_fname):
-    with sqlite3.connect(db_fname) as conn:
-        cur = conn.cursor()
-        # nmols_embedded_3d = sum(cur.execute('SELECT min(nmols) FROM mols WHERE parent_mol_id IS NULL GROUP BY id').fetchall())
-        nmol_stored = sum(cur.execute('SELECT COUNT(DISTINCT id) FROM mols').fetchone())
-        # cur.execute('SELECT c, count(rowid) FROM '
-        #             '(SELECT id, max(matched_ids_count) as c FROM mols GROUP BY id)')
-        # nmol_stored = cur.fetchall()
-        nmol_not_expaded = sum(cur.execute('SELECT COUNT(DISTINCT id) FROM mols WHERE used = 0').fetchone())
-        output = (f'Total number of mols found: {nmol_stored}, '
-                  f'number of remained not expanded mols: {nmol_not_expaded}')
-    return output
-
-
-def main():
+def entry_point():
     parser = argparse.ArgumentParser(description='Grow structures to fit query pharmacophore.',
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+                                     formatter_class=lambda prog: argparse.ArgumentDefaultsHelpFormatter(prog, width=80))
 
     group1 = parser.add_argument_group("Input /output")
     group1.add_argument('-q', '--query', metavar='FILENAME', required=True,
@@ -650,4 +502,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    entry_point()

@@ -20,7 +20,6 @@ import timeit
 import traceback
 import yaml
 
-#from dask import bag
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolDescriptors
 from rdkit.Chem.AllChem import GetConformerRMSMatrix
@@ -35,8 +34,6 @@ from pmapper.pharmacophore import Pharmacophore as P
 from openbabel import openbabel as ob
 from openbabel import pybel
 from sklearn.cluster import AgglomerativeClustering
-
-from pharm_class import PharmModel2
 
 
 def gen_stereo(mol):
