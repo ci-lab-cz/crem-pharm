@@ -13,7 +13,8 @@ def calc(items):
     core_id, core_smi = items
     m = Chem.MolFromSmiles(core_smi)
     if m:
-        q = P._get_features_atom_ids(m, smarts)
+        p = P()
+        q = p._get_features_atom_ids(m, smarts)
         q = ','.join(f'n{k if k != "a" else "Ar"} = {len(v)}' for k, v in q.items())  # nA = 5, nD = 2, nAr = 1
                                                                                       # nAr - number of aromatic features
                                                                                       # used due to case-insensistive

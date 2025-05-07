@@ -9,7 +9,7 @@ By default the program should work as previously.
 
 ```
 conda install -c conda-forge python rdkit scikit-learn openbabel networkx pyyaml dask distributed
-pip install crem
+pip install crem pmapper
 
 # Specific version of psearch supporting pre-compiled pharmacophore databases
 pip install git+https://github.com/meddwl/psearch.git@gen_pharms
