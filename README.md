@@ -1,21 +1,120 @@
-This version supports additional filtering of growing fragments by pre-compiled db of 3D pharmacophore hashes for up to 6 feature combinations and fragments with up to 12 heavy atoms.
+# CReM-pharm: enumeration of compounds based on 3D pharmacophores
 
-Requires the corresponding version of crem module, which supports filter_func argument.
+Starting fragments matching a subset of pharmacophoree features are grown to match all remaining features. CReM generator is used for structure growing that provides flexible control over synthetic feasibility of generated structures. The search is designed in a balanced way, where the algorithm tries to expand all seach branches and later explore them exhaustively. Therefore, the generation may be interrupted at will (and continue later if necessary).  
 
-By default the program should work as previously.  
-
-
-#### Installation of modules required for running program supporting additional filtering of fragments by 3D hashes
+## Installation
 
 ```
 conda install -c conda-forge python rdkit scikit-learn openbabel networkx pyyaml dask distributed
 pip install crem pmapper
 
 # Specific version of psearch supporting pre-compiled pharmacophore databases
-pip install git+https://github.com/meddwl/psearch.git@gen_pharms
+pip install git+https://github.com/meddwl/psearch.git@crempharm
 ```
-Optional installations of conformer generators
+### installations of conformer generators
 
-**CDPKit** (highly recommended) - https://cdpkit.org/installation.html#installation-via-installer-package (install all binaries. not Python-bindings only)  
+CReM-pharm supports three conformer generators, which may be installed
+
+**CDPKit** (highly recommended)  
+Fast generation of high quality conformers (10x RDKit). Install all binaries, not Python-bindings only - https://cdpkit.org/installation.html#installation-via-installer-package
+
+**RDKit** (installed by default)
 
 **OpenBabel**
+ 
+## Generation of a database of conformers of starting fragments
+
+Generate 10 conformers per molecule using 10 cores.
+
+```
+gen_db -i frags.smi -o frags.dat -n 10 -c 10 -v
+```
+The script supports filtering conformers by energy and RMSD, enumerates stereoisomers for undefined stereocenters and double bonds, etc.
+
+## Pharmacophore query format
+
+Pharmacophore is supplied as xyz-file. The first row is blank, the second row can be keep constant `bin_step=1`. Each other row is a definision of a pharmacophore feature: a type and three coordinates.  
+Feature types are:  
+A - H-bond acceptor  
+D - H-bond donor  
+a - aromatic  
+H - hydrophobic  
+P - positively charged center  
+N - negatively charged center  
+e - exclusion volume  
+
+Definition of pharmacophore features are detrmined by [pmapper](https://github.com/DrrDom/pmapper) by default. Exclusion volumes can be parsed from the model file or specified manually.
+
+```text
+
+bin_step=1
+H 4.48 27.86 7.1
+H -1.33 28.56 11.28
+A 1.63 31.91 7.0
+A 7.47 25.97 8.66
+A 6.82 24.61 6.65
+D 3.11 30.12 6.57
+D 0.01 33.4 7.84
+D 5.53 24.31 8.82
+e 3.32 23.52 0.21
+e 3.51 22.56 0.98
+```
+
+Pharmacophore models can be converted to xyz format from Pharmit and LiganScout files by means of `pmapper`.  
+
+```python
+from pmapper.pharmacophore import Pharmacophore as P
+p = P()
+# Pharmit
+p.load_from_pharmit('model.json')
+p.save_to_xyz('model.xyz')
+# LigandScout
+p.load_ls_model('model.pml')
+p.save_to_xyz('model.xyz')
+```
+
+### Note on exclusion volumes
+Usually exclusion volumes are quite sparse in models. Therefore, to avoid proliferation of a ligand between exclusion volumes during the generation one may choose a larger radius of exclusion volumes (`--exclusion_volume` argument) or assigned exclusion volume to each protein atom in vicinity of a reference ligand used for structure-based model retrieval. Increasing the radius of exclusion volumes may result in a smaller cavity available to a ligand to grow.
+
+Exclusion volumes are optional. They only prevents of generation of unnecessary large molecules, which will be discarded later nevertheless.
+
+## Run CReM-pharm
+
+Example of a run
+
+```bash
+crempharm --query model.xyz --ids 2 5 6 --output output_dir --clustering_threshold 3 \
+  --db crem_fragment.db --conf_gen cdpkit --nconf 10 --seed 42 --dist 1.5 --exclusion_volume 2.2 \
+  --fragments frags.dat --mw 450 --tpsa 120 --rtb 7 --logp 4 --ncpu 3 -w 10 --log log.txt
+```
+
+`--query model.xyz` - 3D pharmacophore model  
+`--ids 2 5 6` - list of pharmacophore model feature ids, which will be used at the first iteration to screening the starting fragments. It is recommened to choose 3 or 4 features which are placed close enough to be able to be matched by a single starting fragment.   
+`--output output_dir` - the output directory, where output files will be stored. If the directory exists and contains `res.db`, the generation will be automatically continued.  
+`--clustering_threshold 3` - remaining pharmacophore features (not specified at the start) will be clustered to determine groups of featurtes to be used on each iteration of structure expansion. These groups are determined by agglomerative clustering using a specific threshold.  
+`--db crem_fragment.db` - a database of precompiled CReM fragments using for structure generation  
+`--conf_gen cdpkit` - conformer generator to use  
+`--nconf 10` - number of conformers  
+`--seed 42` - seed only applicable to conformer generation
+`--dist 1.5` - the maximum distance from a query features to a pharmacophore center of a molecule (all features has the same distance)  
+`--exclusion_volume 2.2` - minimum distance from any atom of a molecule to any exclusion volume feature (all exclusion volumes has the same distance)  
+`--fragments frags.dat` - a starting fragment database created as described above  
+`--mw 450 --tpsa 120 --rtb 7 --logp 4` - maximum allowed physicochemical properties of generated structures, it they are exceeded a molecule will not grow anymore  
+`--ncpu 3` - number of cores used for expand a single molecule
+`-w 10` - number of molecules expanded simultaneously. The product of `--ncpu` and `-w` may exceed the total number of cores to fully utilize resources.  
+`--log log.txt` - log file, where a user may monitor progress. A more detailed output is printed to a console.  
+
+### CReM databses and their enhancement with pharmacophore feature count
+
+Precompiled CReM fragment databases suitable for CReM-pharm can be downloaded [here](https://qsar4u.com/pages/crem.php).  
+
+If a custom CReM fragment database is used it is worth to enhance it. Fragments for growing can be selected based on the minimal number of required features count. If an adding fragment should match an H-bond donor, there is no sense to try to embed a fragment which does not containg this type of features. Therefore, CReM database can be enhanced by adding these feature counts.
+
+```
+crempharm_add_pmapper -i crem.db -c 10 -v
+```
+Availability of feature counts will be detected automatically and the generation will be adjusted accordongly. The precompiled databases already contain these additional columns. 
+
+## License
+
+## Citation
