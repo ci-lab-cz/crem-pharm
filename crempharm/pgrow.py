@@ -284,6 +284,17 @@ def expand_mol_cli(mol, pharm_fname, config_fname):
     return tuple([int(mol.GetProp('_Name')), tuple(new_mols), conf_mol_count, debug])
 
 
+def test_additional_features(cremdb, radius):
+    required_columns = {'nA', 'nD', 'nH', 'nAr', 'nN', 'nP'}
+    with sqlite3.connect(cremdb) as conn:
+        cur = conn.cursor()
+        cur.execute(f"PRAGMA table_info(radius{radius})")
+        columns_info = cur.fetchall()
+        existing_columns = {col[1] for col in columns_info}
+        return required_columns.issubset(existing_columns)
+    return False
+
+
 def entry_point():
     parser = argparse.ArgumentParser(description='Grow structures to fit query pharmacophore.',
                                      formatter_class=lambda prog: argparse.ArgumentDefaultsHelpFormatter(prog, width=80))
@@ -330,9 +341,6 @@ def entry_point():
     group3.add_argument('--max_replacements', metavar='INTEGER', type=int, default=None,
                         help='maximum number of fragments considered for growing. By default all fragments are '
                              'considered, that may cause combinatorial explosion in some cases.')
-    group3.add_argument('-x', '--additional_features', action='store_true', default=False,
-                        help='indicate if the fragment database contains pharmacophore features to be used for '
-                             'fragment selection.')
 
     group4 = parser.add_argument_group("Physicochemical properties")
     group4.add_argument('--mw', metavar='NUMERIC', required=False, type=float, default=450,
@@ -454,9 +462,12 @@ def entry_point():
     with open(pharm_fname, 'wb') as f:
         pickle.dump(p, f)
 
+    # whether crem db contains pharmacophore feature count
+    additional_features = test_additional_features(args.db, args.radius)
+
     config_fd, config_fname = tempfile.mkstemp(suffix='_config.yml', text=True)
     with open(config_fname, 'wt') as f:
-        yaml.safe_dump({'additional_features': args.additional_features,
+        yaml.safe_dump({'additional_features': additional_features,
                         'max_mw': args.mw, 'max_tpsa': args.tpsa, 'max_rtb': args.rtb,
                         'max_logp': args.logp, 'hash_db': args.hash_db,
                         'hash_db_bin_step': args.hash_db_bin_step, 'crem_db': args.db,
