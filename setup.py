@@ -26,6 +26,7 @@ setuptools.setup(
         "Topic :: Scientific/Engineering :: Chemistry"
     ],
     python_requires='>=3.6',
+    install_requires=['pmapper>=1.1.3'],
     extras_require={
         'rdkit': ['rdkit>=2017.09'],
     },

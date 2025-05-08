@@ -395,7 +395,12 @@ def entry_point():
     args.ids = tuple(sorted(set(args.ids)))
 
     p = PharmModel2()
-    p.load_from_xyz(args.query)
+    try:
+        p.load_from_xyz(args.query)
+    except ValueError as e:
+        logging.error(e)
+        sys.exit(1)
+
     p.set_clusters(args.clustering_threshold, args.ids)
     if args.log:
         logging.info('Pharmacophore model was parsed.')

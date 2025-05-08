@@ -11,7 +11,7 @@ pip install crem pmapper
 # Specific version of psearch supporting pre-compiled pharmacophore databases
 pip install git+https://github.com/meddwl/psearch.git@crempharm
 ```
-### installations of conformer generators
+### installation of conformer generators
 
 CReM-pharm supports three conformer generators, which may be installed
 
@@ -33,7 +33,7 @@ The script supports filtering conformers by energy and RMSD, enumerates stereois
 
 ## Pharmacophore query format
 
-Pharmacophore is supplied as xyz-file. The first row is blank or any text can be there, the second row can be keep constant `bin_step=1`. Each other row is a definision of a pharmacophore feature: a type and three coordinates.  
+Pharmacophore is supplied as xyz-file. The first row is blank or any text can be there, the second row can be keep constant `bin_step=1` or keep it blank. Each other row is a definision of a pharmacophore feature: a type and three coordinates separated by spaces.  
 Feature types are:  
 A - H-bond acceptor  
 D - H-bond donor  
