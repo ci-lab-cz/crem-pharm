@@ -364,6 +364,8 @@ def entry_point():
     args = parser.parse_args()
 
     if args.log:
+        if not os.path.exists(os.path.dirname(args.log)):
+            os.makedirs(os.path.dirname(args.log))
         logging.basicConfig(filename=args.log, filemode='a', level=logging.DEBUG,
                             encoding='utf-8', datefmt='%Y-%m-%d %H:%M:%S',
                             format='[%(asctime)s] %(levelname)s: (PID:%(process)d) %(message)s')
