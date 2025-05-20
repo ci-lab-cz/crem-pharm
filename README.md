@@ -117,4 +117,6 @@ Availability of feature counts will be detected automatically and the generation
 
 ## License
 
+GPLv3
+
 ## Citation
