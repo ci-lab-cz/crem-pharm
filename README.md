@@ -5,7 +5,7 @@ Starting fragments matching a subset of pharmacophoree features are grown to mat
 ## Installation
 
 ```
-conda install -c conda-forge python rdkit scikit-learn openbabel networkx pyyaml dask distributed
+conda install -c conda-forge python rdkit scikit-learn openbabel networkx=3.3 pyyaml dask distributed
 pip install crem pmapper
 
 # Specific version of psearch supporting pre-compiled pharmacophore databases
