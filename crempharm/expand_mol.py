@@ -20,7 +20,7 @@ import timeit
 import traceback
 import yaml
 
-from rdkit import Chem
+from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem, rdMolDescriptors
 from rdkit.Chem.AllChem import GetConformerRMSMatrix
 from rdkit.Chem.Crippen import MolLogP
@@ -862,7 +862,9 @@ def main():
     with open(args.input, 'rb') as f:
         mol = pickle.load(f)
 
+    RDLogger.DisableLog('rdApp.warning')
     new_mols, conf_count, timings = expand_mol(mol=mol, pharmacophore=pharm, **config)
+    RDLogger.EnableLog('rdApp.warning')
 
     with open(args.output, 'wb') as f:
         pickle.dump(new_mols, f)
