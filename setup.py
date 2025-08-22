@@ -1,6 +1,6 @@
 import setuptools
 from os import path
-import crem
+import crempharm
 
 this_directory = path.abspath(path.dirname(__file__))
 with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
@@ -8,7 +8,7 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
 
 setuptools.setup(
     name="crempharm",
-    version=crem.__version__,
+    version=crempharm.__version__,
     author="Pavel Polishchuk",
     author_email="pavel_polishchuk@ukr.net",
     description="CReM-pharm: enumeration of structures based on 3D pharmacophores by means of CReM",
@@ -20,7 +20,7 @@ setuptools.setup(
     package_data={'crem': ['scripts/*']},
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: BSD License",
+        "License :: OSI Approved :: GPL3 License",
         "Operating System :: OS Independent",
         "Topic :: Scientific/Engineering :: Bio-Informatics",
         "Topic :: Scientific/Engineering :: Chemistry"
