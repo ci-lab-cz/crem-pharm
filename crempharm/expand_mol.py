@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+import platform
 import pickle
 from collections import defaultdict, Counter
 from multiprocessing import Pool
@@ -618,8 +619,11 @@ def gen_confs_cdpkit(mols, template_mol, nconf, ncpu):
         with open(template_fname, 'wt') as f:
             f.write(Chem.MolToMolBlock(template_mol))
 
-        cmd = (f'confgen -i {input_fname} -o {output_fname} -j {template_fname} -n {nconf} -t {ncpu} '
-               f'-a -m systematic --progress 0 > /dev/null 2>/dev/null')
+        args = f' -i {input_fname} -o {output_fname} -j {template_fname} -n {nconf} -t {ncpu} -a -m systematic --progress 0 '
+        if platform.system() == 'Windows':
+            cmd = f'confgen.exe {args} > NUL 2>&1'
+        else:
+            cmd = f'confgen {args} > /dev/null 2>/dev/null'
         subprocess.run(cmd, shell=True)
         output = read_multi_conf_sdf(output_fname)
 
