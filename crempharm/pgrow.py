@@ -323,7 +323,7 @@ def entry_point():
     group2.add_argument('-s', '--seed', metavar='INTEGER', required=False, type=int, default=-1,
                         help='seed for random number generator to get reproducible output.')
     group2.add_argument('--dist', metavar='NUMERIC', required=False, type=float, default=1,
-                        help='maximum distance to discard conformers in fast filtering.')
+                        help='maximum distance between corresponding ligand and protein pharmacophore centers.')
     group2.add_argument('-e', '--exclusion_volume', metavar='NUMERIC', required=False, type=float, default=-1,
                         help='radius of exclusion volumes (distance to heavy atoms). By default exclusion volumes are '
                              'disabled even if they are present in a query pharmacophore. To enable them set '
