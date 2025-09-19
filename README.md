@@ -13,14 +13,10 @@ pip install git+https://github.com/meddwl/psearch.git@crempharm
 ```
 ### installation of conformer generators
 
-CReM-pharm supports three conformer generators, which may be installed
+CReM-pharm supports three conformer generators: CDPKit, RDKit, Openbabel
 
 **CDPKit** (highly recommended)  
 Fast generation of high quality conformers (10x RDKit). Install all binaries, not Python-bindings only - https://cdpkit.org/installation.html#installation-via-installer-package
-
-**RDKit** (installed by default)
-
-**OpenBabel**
  
 ## Generation of a database of conformers of starting fragments
 
@@ -43,7 +39,7 @@ P - positively charged center
 N - negatively charged center  
 e - exclusion volume  
 
-Definition of pharmacophore features are detrmined by [pmapper](https://github.com/DrrDom/pmapper) by default. Exclusion volumes can be parsed from the model file or specified manually.
+Definition of pharmacophore features are determined by [pmapper](https://github.com/DrrDom/pmapper) by default. Exclusion volumes can be read from a model file or specified manually.
 
 ```text
 
@@ -58,9 +54,10 @@ D 0.01 33.4 7.84
 D 5.53 24.31 8.82
 e 3.32 23.52 0.21
 e 3.51 22.56 0.98
+...
 ```
 
-Pharmacophore models can be converted to xyz format from Pharmit and LiganScout files by means of `pmapper`.  
+Pharmacophore models from Pharmit and LiganScout can be converted to xyz format by means of `pmapper`.  
 
 ```python
 from pmapper.pharmacophore import Pharmacophore as P
@@ -74,7 +71,7 @@ p.save_to_xyz('model.xyz')
 ```
 
 ### Note on exclusion volumes
-Usually exclusion volumes are quite sparse in models. Therefore, to avoid proliferation of a ligand between exclusion volumes during the generation one may choose a larger radius of exclusion volumes (`--exclusion_volume` argument) or assigned exclusion volume to each protein atom in vicinity of a reference ligand used for structure-based model retrieval. Increasing the radius of exclusion volumes may result in a smaller cavity available to a ligand to grow.
+Usually exclusion volumes are quite sparsely placed in pharmacophore models. Therefore, to avoid proliferation of a ligand between exclusion volumes during the generation one may choose a larger radius of exclusion volumes (`--exclusion_volume` argument) or assigned exclusion volume to each protein atom in vicinity of a reference ligand used for structure-based model retrieval. Increasing the radius of exclusion volumes may result in a smaller cavity available to a ligand to grow.
 
 Exclusion volumes are optional. They only prevents of generation of unnecessary large molecules, which will be discarded later nevertheless.
 
