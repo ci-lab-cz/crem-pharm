@@ -12,7 +12,7 @@ Starting fragments used in a study can be accessef by this link https://doi.org/
 
 ```
 crempharm -q ${QUERY}_full.xyz --ids ${IDS} -o output_dir \
-  -t 3 -f starting_fragments.dat.dat -d chembl33_sa25_f5.db \
+  -t 3 -f starting_fragments.dat -d chembl33_sa25_f5.db \
   -r 3 -n 20 --conf_gen cdpkit --dist 1.5 -e 2.2 --mw 450 \
   --tpsa 120 --rtb 7 --logp 4 -c 2 -w 4
 ```
