@@ -19,7 +19,7 @@ pip install
 CReM-pharm supports three conformer generators: CDPKit, RDKit, Openbabel
 
 **CDPKit** (highly recommended)  
-Fast generation of high quality conformers (10x RDKit). Install all binaries, not Python-bindings only - https://cdpkit.org/installation.html#installation-via-installer-package
+Fast generation of high quality conformers (~90x speed up relatively to RDKit). Install all binaries, not Python-bindings only - https://cdpkit.org/installation.html#installation-via-installer-package
  
 ## Generation of a database of conformers of starting fragments
 
