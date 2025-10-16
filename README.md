@@ -120,17 +120,22 @@ Availability of feature counts will be detected automatically and the generation
 To extract structures from an output database we recommend to use `get_sdf_from_dock_db` utility from [EasyDock](https://github.com/ci-lab-cz/easydock).  
 To install EasyDock `pip install easydock`
 
-To get all conformers for all compounds stored in a database.  
+To get all conformers for all compounds stored in a database. 
+
 `get_sdf_from_dock_db -i res.db -o res.sdf`
 
 To get only the first conformer for all compounds. It may be that there will be several conformers matching a pharmacophore features.  
+
 `get_sdf_from_dock_db -i res.db -o res.sdf -f`
 
 To get first conformers of compounds which matched at least 4 features in a model.  
+
 `get_sdf_from_dock_db -i res.db -o res.sdf -f --add_sql 'matched_ids_count >= 4'`
 
 To get SMILES of generated structures along with their ids in a database.  
+
 `get_sdf_from_dock_db -i res.db -o res.smi -f --fields id`  
+
 ## License
 
 GPLv3
