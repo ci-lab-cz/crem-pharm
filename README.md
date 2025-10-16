@@ -10,6 +10,9 @@ pip install crem pmapper
 
 # Specific version of psearch supporting pre-compiled pharmacophore databases
 pip install git+https://github.com/meddwl/psearch.git@crempharm
+
+pip install crempharm
+pip install 
 ```
 ### installation of conformer generators
 
@@ -117,3 +120,6 @@ Availability of feature counts will be detected automatically and the generation
 GPLv3
 
 ## Citation
+
+
+3D pharmacophore models used in the study, structures of all generative runs of CReM-pharm and PGMG as well as ZINC compounds and active compounds from ChEMBL are accessible at https://doi.org/10.5281/zenodo.17174628. Pre-compiled CReM fragments databases are available at https://doi.org/10.5281/zenodo.16909328.
