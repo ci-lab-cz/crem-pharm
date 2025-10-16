@@ -1,3 +1,6 @@
+import sys
+import traceback
+
 import numpy as np
 import pandas as pd
 from collections import defaultdict
@@ -5,6 +8,7 @@ from sklearn.cluster import AgglomerativeClustering
 from scipy.spatial.distance import cdist
 
 from pmapper.pharmacophore import Pharmacophore as P
+from pmapper.customize import load_smarts
 
 
 class PharmModel2(P):
@@ -68,6 +72,7 @@ class PharmModel2(P):
 
     def load_from_xyz(self, fname):
         self.exclvol = []
+        allowed_featule_labels = set(load_smarts().keys()) | {'e'}
         with open(fname) as f:
             feature_coords = []
             f.readline()
@@ -79,6 +84,10 @@ class PharmModel2(P):
             for line in f:
                 label, *coords = line.strip().split()
                 coords = tuple(map(float, coords))
+                if label not in allowed_featule_labels:
+                    raise ValueError(f'Feature label {label} is not in the list of allowed feature labels')
+                if len(coords) != 3:
+                    raise ValueError(f'Feature coordinates {coords} are not 3 dimensional')
                 if label != 'e':
                     feature_coords.append((label, coords))
                 else:
@@ -88,5 +97,3 @@ class PharmModel2(P):
             self.exclvol = np.array(self.exclvol)
         else:
             self.exclvol = None
-
-
