@@ -117,8 +117,7 @@ Availability of feature counts will be detected automatically and the generation
 
 ### Extract generated structures
 
-To extract structures from an output database we recommend to use `get_sdf_from_dock_db` utility from [EasyDock](https://github.com/ci-lab-cz/easydock).  
-To install EasyDock `pip install easydock`
+To extract structures from an output database we recommend to use `get_sdf_from_dock_db` utility from [EasyDock](https://github.com/ci-lab-cz/easydock). To install EasyDock `pip install easydock`
 
 To get all conformers for all compounds stored in a database. 
 
