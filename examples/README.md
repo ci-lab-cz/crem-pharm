@@ -1,12 +1,16 @@
 # Examples
 
+## Pharmacophore models
+
+This is a list of 3D pharmacophore models including exclusion volumes in a format suitable for CReM-pharm.
+
 ## CReM fragment database
 
-You may download them from this link https://doi.org/10.5281/zenodo.16909328
+You may download pre-compiled CReM fragment databases by this link https://doi.org/10.5281/zenodo.16909328
 
 ## Starting fragments
 
-Starting fragments used in a study can be accessef by this link https://doi.org/10.5281/zenodo.17174628
+Starting fragments used in a study can be accessed by this link https://doi.org/10.5281/zenodo.17174628 (file `starting_fragments.zip`)
 
 ## Run generation
 
@@ -33,3 +37,7 @@ QUERY | IDS
 6uwp | 3 6 7 
 7ont | 0 4 5 6 
 8dv7 | 2 6 7 
+
+Output dir should be distinct for each run. File name of a CReM fragments database can be changed. The values for `-w` (number of molecules processed concurrently) and `-c` (number of cores to process a single molecule) you may choose based on your total number of CPUs.
+
+Generations with these settings may run for relatively long time depending on a query model. However, you may interrupt generation at any moment and resume them later by invoking the same command. 
