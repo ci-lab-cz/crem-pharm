@@ -89,7 +89,7 @@ crempharm --query model.xyz --ids 2 5 6 --output output_dir --clustering_thresho
 ```
 
 `--query model.xyz` - 3D pharmacophore model  
-`--ids 2 5 6` - list of pharmacophore model feature ids, which will be used at the first iteration to screening the starting fragments. It is recommened to choose 3 or 4 features which are placed close enough to be able to be matched by a single starting fragment.   
+`--ids 2 5 6` - list of pharmacophore model feature ids (0-based indexing), which will be used at the first iteration to screening the starting fragments. It is recommened to choose 3 or 4 features which are placed close enough to be able to be matched by a single starting fragment.   
 `--output output_dir` - the output directory, where output files will be stored. If the directory exists and contains `res.db`, the generation will be automatically continued.  
 `--clustering_threshold 3` - remaining pharmacophore features (not specified at the start) will be clustered to determine groups of featurtes to be used on each iteration of structure expansion. These groups are determined by agglomerative clustering using a specific threshold.  
 `--db crem_fragment.db` - a database of precompiled CReM fragments using for structure generation  
