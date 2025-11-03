@@ -21,7 +21,7 @@ crempharm -q ${QUERY}_full.xyz --ids ${IDS} -o output_dir \
   --tpsa 120 --rtb 7 --logp 4 -c 2 -w 4
 ```
 
-Recommended starting feature ids for individual pharmacophore models
+Recommended starting feature ids for individual pharmacophore models (indexing is 0-based)
 
 QUERY | IDS
 --|--

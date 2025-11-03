@@ -28,7 +28,8 @@ Generate 10 conformers per molecule using 10 cores.
 ```
 gen_db -i frags.smi -o frags.dat -n 10 -c 10 -v
 ```
-The script supports filtering conformers by energy and RMSD, enumerates stereoisomers for undefined stereocenters and double bonds, etc.
+The script supports filtering conformers by energy and RMSD, enumerates stereoisomers for undefined stereocenters and double bonds, etc.  
+An example of starting fragments can be found at this [repository](https://doi.org/10.5281/zenodo.17174627)
 
 ## Pharmacophore query format
 
