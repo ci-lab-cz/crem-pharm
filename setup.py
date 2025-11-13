@@ -32,5 +32,6 @@ setuptools.setup(
     },
     entry_points={'console_scripts':
                       ['crempharm = crempharm.pgrow:entry_point',
-                       'crempharm_add_pmapper = crempharm.scripts.crem_db_labeling:entry_point']}
+                       'crempharm_add_pmapper = crempharm.scripts.crem_db_labeling:entry_point',
+                       'get_mols_seq = crempharm.scripts.get_mols_seq:entry_point']}
 )
