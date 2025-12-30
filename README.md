@@ -12,7 +12,8 @@ pip install crem pmapper
 pip install git+https://github.com/meddwl/psearch.git@crempharm
 
 pip install crempharm
-pip install 
+# or
+pip install git+https://github.com/ci-lab-cz/crem-pharm.git 
 ```
 ### installation of conformer generators
 
