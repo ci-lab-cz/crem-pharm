@@ -15,9 +15,9 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/ci-lab-cz/crem-pharm",
-    packages=['crempharm'],
+    packages=setuptools.find_packages(),
     include_package_data=True,
-    package_data={'crem': ['scripts/*']},
+    package_data={'crempharm': ['scripts/*']},
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GPL3 License",
