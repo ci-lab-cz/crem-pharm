@@ -74,31 +74,30 @@ def _process_table(conn, pool, table, id_col, smi_col, verbose, fetch_batch, wri
         + f" WHERE {id_col} = ?"
     )
 
-    def _stream():
-        while True:
-            rows = cur.fetchmany(fetch_batch)
-            if not rows:
-                break
-            yield from rows
-
-    batch = []
+    write_batch_buf = []
     processed = 0
 
-    for row_id, vals in pool.imap_unordered(_calc, _stream(), chunksize=imap_chunk):
-        batch.append((*vals, row_id))
-        if len(batch) >= write_batch:
-            conn.executemany(update_sql, batch)
-            conn.commit()
-            processed += len(batch)
-            batch = []
-            if verbose:
-                sys.stderr.write(f"\r  {processed}/{total}")
-                sys.stderr.flush()
+    while True:
+        # Fetch in the main thread — cursor must not cross thread boundaries
+        rows = cur.fetchmany(fetch_batch)
+        if not rows:
+            break
 
-    if batch:
-        conn.executemany(update_sql, batch)
+        for row_id, vals in pool.imap_unordered(_calc, rows, chunksize=imap_chunk):
+            write_batch_buf.append((*vals, row_id))
+            if len(write_batch_buf) >= write_batch:
+                conn.executemany(update_sql, write_batch_buf)
+                conn.commit()
+                processed += len(write_batch_buf)
+                write_batch_buf = []
+                if verbose:
+                    sys.stderr.write(f"\r  {processed}/{total}")
+                    sys.stderr.flush()
+
+    if write_batch_buf:
+        conn.executemany(update_sql, write_batch_buf)
         conn.commit()
-        processed += len(batch)
+        processed += len(write_batch_buf)
 
     if verbose:
         sys.stderr.write(f"\r  {processed}/{total}\n")
