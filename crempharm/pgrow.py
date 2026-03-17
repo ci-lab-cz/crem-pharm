@@ -341,6 +341,9 @@ def entry_point():
     group3.add_argument('--max_replacements', metavar='INTEGER', type=int, default=None,
                         help='maximum number of fragments considered for growing. By default all fragments are '
                              'considered, that may cause combinatorial explosion in some cases.')
+    group3.add_argument('--set_names', metavar='SET NAMES', type=str, nargs='*', default=None,
+                        help='column name(s) in radius tables (v1 database only) defining the set(s) of fragments. '
+                             'If None (default), all available set columns are used. Ignored for v0 databases.')
 
     group4 = parser.add_argument_group("Physicochemical properties")
     group4.add_argument('--mw', metavar='NUMERIC', required=False, type=float, default=450,
@@ -479,7 +482,8 @@ def entry_point():
                         'radius': args.radius, 'max_replacements': args.max_replacements,
                         'nconf': args.nconf, 'conf_gen': args.conf_gen, 'dist': args.dist,
                         'exclusion_volume_dist': args.exclusion_volume, 'seed': args.seed,
-                        'output_dir': args.output, 'dask_num_workers': 0, 'ncpu': args.ncpu},
+                        'output_dir': args.output, 'dask_num_workers': 0, 'ncpu': args.ncpu,
+                        'set_names': args.set_names},
                        f)
 
     try:

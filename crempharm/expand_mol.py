@@ -670,7 +670,7 @@ def filter_confs(mol, template_conf_id, template_mol, pharm, evol, dist, new_pid
 
 def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rtb, max_logp, hash_db, hash_db_bin_step,
                crem_db, radius, max_replacements, nconf, conf_gen, dist, exclusion_volume_dist, seed,
-               output_dir, dask_num_workers=0, ncpu=1):
+               output_dir, set_names=None, dask_num_workers=0, ncpu=1):
 
     timings = []
     start = timeit.default_timer()
@@ -703,6 +703,7 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
                              max_replacements=max_replacements, replace_ids=atom_ids, return_mol=True,
                              ncores=4,
                              filter_func=partial(filter_by_hashes, db_hashes=hash_db, hashes=hashes) if use_hash_db else None,
+                             set_names=set_names,
                              **kwargs))
 
     timings.append(f'mol grow: {len(new_mols)} mols, {round(timeit.default_timer() - start2, 4)}')
