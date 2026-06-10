@@ -3,6 +3,7 @@
 import argparse
 import sqlite3
 import sys
+from contextlib import closing
 
 
 def entry_point():
@@ -19,7 +20,7 @@ def entry_point():
 
     args = parser.parse_args()
 
-    with sqlite3.connect(args.input) as conn:
+    with closing(sqlite3.connect(args.input)) as conn:
         with open(args.output, 'w') as out:
 
             cur = conn.cursor()

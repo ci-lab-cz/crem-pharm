@@ -6,6 +6,7 @@ import sys
 import platform
 import pickle
 from collections import defaultdict, Counter
+from contextlib import closing
 from multiprocessing import Pool
 from functools import partial
 from scipy.spatial.distance import cdist
@@ -323,6 +324,7 @@ def select_mols(mols, ncpu=1):
     finally:
         if pool:
             pool.close()
+            pool.join()
 
     return output
 
@@ -358,6 +360,7 @@ def merge_confs(mols_dict, ncpu=1):
         mols = list(pool.imap_unordered(combine_conformers, smiles.values()))
     finally:
         pool.close()
+        pool.join()
     return mols
 
 
@@ -533,9 +536,9 @@ def filter_by_hashes(row_ids, cur, radius, db_hashes, hashes):
         for i, smi in cur.execute(sql, batch).fetchall():
             smis[smi].append(i)
 
-    con = sqlite3.connect(db_hashes)
-    sql = f"SELECT DISTINCT(frags.smi) FROM frags, hashes WHERE frags.id == hashes.id AND hashes.hash IN ({','.join('?' * len(hashes))})"
-    res = [item[0] for item in con.execute(sql, list(hashes)).fetchall()]
+    with closing(sqlite3.connect(db_hashes)) as con:
+        sql = f"SELECT DISTINCT(frags.smi) FROM frags, hashes WHERE frags.id == hashes.id AND hashes.hash IN ({','.join('?' * len(hashes))})"
+        res = [item[0] for item in con.execute(sql, list(hashes)).fetchall()]
 
     output_row_ids = []
     for smi in res:
@@ -741,15 +744,19 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
         inputs = [(m1, int(re.findall(r'_(.*)$', m1.GetProp('_Name'))[0])) for m1 in new_mols]
 
         pool = Pool(ncpu)
-        for conf_id, m in pool.imap_unordered(partial(filter_confs_mp,
-                                                      template_mol=mol,
-                                                      pharm=pharmacophore,
-                                                      new_pids=new_pids,
-                                                      dist=dist,
-                                                      evol=exclusion_volume_dist),
-                                              inputs):
-            if m:
-                new_mols_dict[conf_id].append(m)
+        try:
+            for conf_id, m in pool.imap_unordered(partial(filter_confs_mp,
+                                                          template_mol=mol,
+                                                          pharm=pharmacophore,
+                                                          new_pids=new_pids,
+                                                          dist=dist,
+                                                          evol=exclusion_volume_dist),
+                                                  inputs):
+                if m:
+                    new_mols_dict[conf_id].append(m)
+        finally:
+            pool.close()
+            pool.join()
 
         # if dask_num_workers:
         #     b = bag.from_sequence(inputs, npartitions=dask_num_workers * 2)
@@ -814,6 +821,7 @@ def expand_mol(mol, pharmacophore, additional_features, max_mw, max_tpsa, max_rt
             new_mols = list(pool.imap_unordered(remove_confs_rms, new_mols))
         finally:
             pool.close()
+            pool.join()
     else:
         new_mols = []
 

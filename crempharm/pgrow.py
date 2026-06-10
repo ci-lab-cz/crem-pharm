@@ -19,6 +19,7 @@ import logging
 from math import cos, sin, pi
 from functools import partial
 from collections import Counter
+from contextlib import closing
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -159,25 +160,28 @@ def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd_to_query, exclvol_xyz
 
     pool = Pool(ncpu)
     output = []
-    for mol in pool.imap_unordered(partial(screen_mp,
-                                           query_mol=query_mol,
-                                           query_nfeatures=query_mol.GetNumAtoms(),
-                                           rmsd_to_query=rmsd_to_query,
-                                           theta=theta,
-                                           rotate_matrix=rotate_mat,
-                                           exclvol_xyz=exclvol_xyz,
-                                           exclvol_dist=exclvol_dist),
-                                   supply_screen(db)):
-        if mol:
-            output.append(mol)
-    pool.close()
+    try:
+        for mol in pool.imap_unordered(partial(screen_mp,
+                                               query_mol=query_mol,
+                                               query_nfeatures=query_mol.GetNumAtoms(),
+                                               rmsd_to_query=rmsd_to_query,
+                                               theta=theta,
+                                               rotate_matrix=rotate_mat,
+                                               exclvol_xyz=exclvol_xyz,
+                                               exclvol_dist=exclvol_dist),
+                                       supply_screen(db)):
+            if mol:
+                output.append(mol)
+    finally:
+        pool.close()
+        pool.join()
 
     return output
 
 
 def choose_mol_to_grow(db_fname, max_features, mol_ids=None):
 
-    with sqlite3.connect(db_fname) as conn:
+    with closing(sqlite3.connect(db_fname)) as conn, conn:
         cur = conn.cursor()
 
         res = None
@@ -286,7 +290,7 @@ def expand_mol_cli(mol, pharm_fname, config_fname):
 
 def test_additional_features(cremdb, radius):
     required_columns = {'nA', 'nD', 'nH', 'nAr', 'nN', 'nP'}
-    with sqlite3.connect(cremdb) as conn:
+    with closing(sqlite3.connect(cremdb)) as conn, conn:
         cur = conn.cursor()
         cur.execute(f"PRAGMA table_info(radius{radius})")
         columns_info = cur.fetchall()
@@ -459,7 +463,7 @@ def entry_point():
         print(f'select_mols: {round(timeit.default_timer() - start, 4)}')
 
     else:  # set all processing flags to 0 (for restart)
-        with sqlite3.connect(res_db_fname) as conn:
+        with closing(sqlite3.connect(res_db_fname)) as conn, conn:
             cur = conn.cursor()
             cur.execute("UPDATE mols SET processing = 0, processing_nmols = 0")
             conn.commit()
@@ -495,6 +499,9 @@ def entry_point():
             if m:
                 futures.append(dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname))
         seq = as_completed(futures, with_results=True)
+        # as_completed keeps its own references to the submitted futures; drop the local list so the
+        # initial tasks are not pinned in worker memory for the whole run.
+        futures = None
         for i, (future, (parent_mol_id, new_mols, nmols, debug)) in enumerate(seq, 1):
             new_mol_ids = save_res(new_mols, parent_mol_id, res_db_fname)
             update_db(res_db_fname, parent_mol_id, 'processing_nmols', -1)
@@ -507,7 +514,9 @@ def entry_point():
                 print(f'===== {parent_mol_id} =====')
                 print(debug)
                 sys.stdout.flush()
-            del future
+            # release the result on the worker promptly rather than waiting for GC of the future
+            future.release()
+            del future, new_mols, debug
             for _ in range(max_tasks - seq.count()):
                 m = choose_mol_to_grow(res_db_fname, p.get_num_features(), mol_ids=new_mol_ids)
                 new_mol_ids = None  # select only one mol to search deep
