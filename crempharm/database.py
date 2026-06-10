@@ -5,7 +5,7 @@ from rdkit import Chem
 
 
 def create_db(db_fname):
-    with closing(sqlite3.connect(db_fname)) as conn, conn:
+    with closing(sqlite3.connect(db_fname, timeout=60)) as conn, conn:
         cur = conn.cursor()
         cur.execute("DROP TABLE IF EXISTS mols")
         cur.execute("CREATE TABLE mols("
@@ -32,7 +32,7 @@ def save_res(mols, parent_mol_id, db_fname):
 
     output = []
 
-    with closing(sqlite3.connect(db_fname)) as conn, conn:
+    with closing(sqlite3.connect(db_fname, timeout=60)) as conn, conn:
         cur = conn.cursor()
 
         if parent_mol_id is not None:
@@ -90,7 +90,7 @@ def update_db(db_fname, mol_id, field, value):
     :param value: increment value, can be negative for processing_nmols
     :return:
     """
-    with closing(sqlite3.connect(db_fname)) as conn, conn:
+    with closing(sqlite3.connect(db_fname, timeout=60)) as conn, conn:
         while mol_id is not None:
             cur = conn.cursor()
             cur.execute('SELECT %s FROM mols WHERE id = %i' % (field, mol_id))
@@ -102,7 +102,7 @@ def update_db(db_fname, mol_id, field, value):
 
 
 def get_stat_string_from_db(db_fname):
-    with closing(sqlite3.connect(db_fname)) as conn, conn:
+    with closing(sqlite3.connect(db_fname, timeout=60)) as conn, conn:
         cur = conn.cursor()
         # nmols_embedded_3d = sum(cur.execute('SELECT min(nmols) FROM mols WHERE parent_mol_id IS NULL GROUP BY id').fetchall())
         nmol_stored = sum(cur.execute('SELECT COUNT(DISTINCT id) FROM mols').fetchone())

@@ -181,7 +181,7 @@ def screen_pmapper(query_pharm, db_fname, output_sdf, rmsd_to_query, exclvol_xyz
 
 def choose_mol_to_grow(db_fname, max_features, mol_ids=None):
 
-    with closing(sqlite3.connect(db_fname)) as conn, conn:
+    with closing(sqlite3.connect(db_fname, timeout=60)) as conn, conn:
         cur = conn.cursor()
 
         res = None
@@ -290,7 +290,7 @@ def expand_mol_cli(mol, pharm_fname, config_fname):
 
 def test_additional_features(cremdb, radius):
     required_columns = {'nA', 'nD', 'nH', 'nAr', 'nN', 'nP'}
-    with closing(sqlite3.connect(cremdb)) as conn, conn:
+    with closing(sqlite3.connect(cremdb, timeout=60)) as conn, conn:
         cur = conn.cursor()
         cur.execute(f"PRAGMA table_info(radius{radius})")
         columns_info = cur.fetchall()
@@ -463,7 +463,7 @@ def entry_point():
         print(f'select_mols: {round(timeit.default_timer() - start, 4)}')
 
     else:  # set all processing flags to 0 (for restart)
-        with closing(sqlite3.connect(res_db_fname)) as conn, conn:
+        with closing(sqlite3.connect(res_db_fname, timeout=60)) as conn, conn:
             cur = conn.cursor()
             cur.execute("UPDATE mols SET processing = 0, processing_nmols = 0")
             conn.commit()

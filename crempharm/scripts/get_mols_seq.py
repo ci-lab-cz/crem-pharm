@@ -20,7 +20,7 @@ def entry_point():
 
     args = parser.parse_args()
 
-    with closing(sqlite3.connect(args.input)) as conn:
+    with closing(sqlite3.connect(args.input, timeout=60)) as conn:
         with open(args.output, 'w') as out:
 
             cur = conn.cursor()
