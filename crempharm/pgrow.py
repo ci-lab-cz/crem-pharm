@@ -256,23 +256,38 @@ def expand_mol_cli(mol, pharm_fname, config_fname):
     conf_count_fd, conf_count_fname = tempfile.mkstemp(suffix='_conf_count.txt', text=True)
     debug_fd, debug_fname = tempfile.mkstemp(suffix='_debug.txt', text=True)
 
+    new_mols = tuple()
+    conf_mol_count = 0
+    debug = ''
+
     try:
         dname = os.path.dirname(os.path.realpath(__file__))
         python_exec = sys.executable
         cmd = f'{python_exec} {os.path.join(dname, "expand_mol.py")} -i {input_fname} -o {output_fname} ' \
               f'-p {pharm_fname} --config {config_fname} --debug {debug_fname} --conf_count {conf_count_fname}'
-        # start_time = timeit.default_timer()
-        subprocess.run(cmd, shell=True)
-        # run_time = round(timeit.default_timer() - start_time, 1)
+        proc = subprocess.run(cmd, shell=True)
 
-        with open(output_fname, 'rb') as f:
-            new_mols = pickle.load(f)
+        # a failed subprocess (e.g. config removed on driver exit, confgen OOM, killed worker)
+        # leaves the output file empty/missing - treat it as "no results" instead of crashing
+        if proc.returncode != 0:
+            sys.stderr.write(f'expand_mol.py exited with code {proc.returncode} for mol '
+                             f'{mol.GetProp("_Name")}; treating it as no results\n')
+        else:
+            try:
+                with open(output_fname, 'rb') as f:
+                    new_mols = pickle.load(f)
 
-        with open(debug_fname) as f:
-            debug = ''.join(f.readlines())
+                with open(debug_fname) as f:
+                    debug = ''.join(f.readlines())
 
-        with open(conf_count_fname) as f:
-            conf_mol_count = int(f.readline().strip())
+                with open(conf_count_fname) as f:
+                    conf_mol_count = int(f.readline().strip())
+            except (EOFError, ValueError, pickle.UnpicklingError) as e:
+                sys.stderr.write(f'failed to read expand_mol.py output for mol '
+                                 f'{mol.GetProp("_Name")}: {e!r}; treating it as no results\n')
+                new_mols = tuple()
+                conf_mol_count = 0
+                debug = ''
 
     finally:
         os.close(input_fd)
@@ -284,7 +299,6 @@ def expand_mol_cli(mol, pharm_fname, config_fname):
         os.unlink(conf_count_fname)
         os.unlink(debug_fname)
 
-    # return tuple([1, tuple(), 3, 'asdf'])
     return tuple([int(mol.GetProp('_Name')), tuple(new_mols), conf_mol_count, debug])
 
 
@@ -490,41 +504,79 @@ def entry_point():
                         'set_names': args.set_names},
                        f)
 
+    seq = None
     try:
+
+        def submit_task(m):
+            return dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname)
 
         max_tasks = 2 * args.num_workers
         futures = []
         for _ in range(max_tasks):
             m = choose_mol_to_grow(res_db_fname, p.get_num_features())
             if m:
-                futures.append(dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname))
+                futures.append(submit_task(m))
         seq = as_completed(futures, with_results=True)
         # as_completed keeps its own references to the submitted futures; drop the local list so the
         # initial tasks are not pinned in worker memory for the whole run.
         futures = None
-        for i, (future, (parent_mol_id, new_mols, nmols, debug)) in enumerate(seq, 1):
-            new_mol_ids = save_res(new_mols, parent_mol_id, res_db_fname)
-            update_db(res_db_fname, parent_mol_id, 'processing_nmols', -1)
-            if nmols:
-                update_db(res_db_fname, parent_mol_id, 'nmols', nmols)
-            if args.log:
-                logging.info(f'{get_stat_string_from_db(res_db_fname)}')
-                # logging.debug(f'===== {parent_mol_id} =====\n' + debug)
-            if debug:
-                print(f'===== {parent_mol_id} =====')
-                print(debug)
-                sys.stdout.flush()
+        for item in seq:
+            # as_completed(with_results=True) yields (future, result). A cancelled or errored task
+            # yields the exception object as its result instead of the expected 4-tuple, so guard the
+            # unpacking - a single bad task must not take down the whole run.
+            future, result = item if isinstance(item, tuple) and len(item) == 2 else (None, item)
+            if isinstance(result, tuple) and len(result) == 4:
+                parent_mol_id, new_mols, nmols, debug = result
+                new_mol_ids = save_res(new_mols, parent_mol_id, res_db_fname)
+                update_db(res_db_fname, parent_mol_id, 'processing_nmols', -1)
+                if nmols:
+                    update_db(res_db_fname, parent_mol_id, 'nmols', nmols)
+                if args.log:
+                    logging.info(f'{get_stat_string_from_db(res_db_fname)}')
+                    # logging.debug(f'===== {parent_mol_id} =====\n' + debug)
+                if debug:
+                    print(f'===== {parent_mol_id} =====')
+                    print(debug)
+                    sys.stdout.flush()
+                refill_ids = new_mol_ids
+                del new_mols, debug
+            else:
+                sys.stderr.write(f'skipping a cancelled/failed task: {result!r}\n')
+                if args.log:
+                    logging.warning(f'skipping a cancelled/failed task: {result!r}')
+                refill_ids = None
+
             # release the result on the worker promptly rather than waiting for GC of the future
-            future.release()
-            del future, new_mols, debug
-            for _ in range(max_tasks - seq.count()):
-                m = choose_mol_to_grow(res_db_fname, p.get_num_features(), mol_ids=new_mol_ids)
-                new_mol_ids = None  # select only one mol to search deep
-                if m:
-                    new_future = dask_client.submit(expand_mol_cli, m, pharm_fname=pharm_fname, config_fname=config_fname)
-                    seq.add(new_future)
+            if future is not None:
+                future.release()
+            del future, result
+
+            try:
+                for _ in range(max_tasks - seq.count()):
+                    m = choose_mol_to_grow(res_db_fname, p.get_num_features(), mol_ids=refill_ids)
+                    refill_ids = None  # select only one mol to search deep
+                    if m:
+                        seq.add(submit_task(m))
+            except Exception as e:
+                # the cluster is no longer accepting work (e.g. shutting down); stop cleanly
+                sys.stderr.write(f'cannot submit new tasks, stopping generation: {e!r}\n')
+                if args.log:
+                    logging.error(f'cannot submit new tasks, stopping generation: {e!r}')
+                break
 
     finally:
+
+        # stop in-flight tasks before removing the shared config/pharm files, otherwise
+        # expand_mol.py subprocesses still running on the workers fail to read them
+        if seq is not None:
+            try:
+                dask_client.cancel(list(seq.futures))
+            except Exception as e:
+                sys.stderr.write(f'failed to cancel outstanding tasks: {e!r}\n')
+        try:
+            dask_client.close()
+        except Exception as e:
+            sys.stderr.write(f'failed to close dask client: {e!r}\n')
 
         os.close(pharm_fd)
         os.close(config_fd)
