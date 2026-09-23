@@ -130,7 +130,7 @@ def entry_point():
 
         version = conn.execute("PRAGMA user_version").fetchone()[0]
 
-        if version == 1:
+        if version in (1, 2):
             # New schema: frags table with core_smi_id as PK
             if args.verbose:
                 sys.stderr.write("Schema version 1: labeling frags table\n")
